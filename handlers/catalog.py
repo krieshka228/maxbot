@@ -1,13 +1,14 @@
 """
 handlers/catalog.py — Каталог для покупателей: категории, товары с фото/видео, поиск, заказ.
 Показываются только активные товары (is_active == True).
+Реализовано атомарное резервирование только при оформлении заказа.
 """
 
 import logging
 import aiomax
 from aiomax import fsm, filters
 from aiomax.buttons import KeyboardBuilder, CallbackButton
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from db import get_session, Product, get_or_create_user, get_or_create_draft, add_item_to_order
 from keyboards import kb_cart_actions, kb_back_to_menu
 from utils import format_cart, parse_quantity
@@ -36,7 +37,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback("catalog:show")
     async def catalog_show_categories(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
-        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
+        await delete_catalog_messages(user_id, bot)
         await show_categories(cb)
 
     async def show_categories(cb: aiomax.Callback):
@@ -51,14 +52,14 @@ def register(bot: aiomax.Bot) -> None:
         kb = KeyboardBuilder()
         if not categories:
             kb.add(CallbackButton("🏠 Главное меню", "menu:main"))
-            await cb.send("📭 В каталоге пока нет категорий.", keyboard=kb, format="markdown")
+            await cb.answer(text="📭 В каталоге пока нет категорий.", keyboard=kb, format="markdown")
             return
 
         for cat in categories:
             kb.add(CallbackButton(cat, f"catalog:category:{cat}"))
             kb.row()
         kb.add(CallbackButton("🏠 Главное меню", "menu:main"))
-        await cb.send("**Выберите категорию:**", keyboard=kb, format="markdown")
+        await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
 
     # ------------------- Товары в категории (пагинация) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
@@ -66,7 +67,7 @@ def register(bot: aiomax.Bot) -> None:
         category = cb.payload.split(":", 2)[2]
         user_id = cb.user.user_id
         await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
-        await show_category_page(bot, cb, category, 0, new_nav=True)
+        await show_category_page(bot, cb, category, 0)
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:catpage:"))
     async def catalog_catpage(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -75,33 +76,41 @@ def register(bot: aiomax.Bot) -> None:
         page = int(parts[3])
         user_id = cb.user.user_id
         await delete_catalog_messages(user_id, bot)
-        await show_category_page(bot, cb, category, page, new_nav=False)
+        await show_category_page(bot, cb, category, page)
 
-    async def show_category_page(bot: aiomax.Bot, cb: aiomax.Callback, category: str, page: int, new_nav: bool):
+    async def show_category_page(bot: aiomax.Bot, cb: aiomax.Callback, category: str, page: int):
         user_id = cb.user.user_id
         async for session in get_session():
             total = (await session.execute(
                 select(func.count(Product.id)).where(
                     Product.is_active == True,
+                    Product.stock > 0,
                     Product.category == category
                 )
             )).scalar()
             products = (await session.execute(
                 select(Product).where(
                     Product.is_active == True,
+                    Product.stock > 0,
                     Product.category == category
                 ).order_by(Product.id)
                 .offset(page * ITEMS_PER_PAGE).limit(ITEMS_PER_PAGE)
             )).scalars().all()
 
         if not products:
-            await cb.send(
-                f"В категории «{category}» пока нет товаров.",
-                keyboard=kb_back_to_menu()
+            await cb.answer(
+                text=f"В категории «{category}» пока нет товаров.",
+                keyboard=kb_back_to_menu(),
+                format="markdown"
             )
             return
 
-        # Отправляем товары (каждый товар отдельным сообщением)
+        total_pages = (total - 1) // ITEMS_PER_PAGE + 1
+
+        # Удаляем все предыдущие сообщения каталога (товары + навигацию)
+        await delete_catalog_messages(user_id, bot)
+
+        # Отправляем каждый товар отдельным сообщением с фото
         new_msgs = []
         for product in products:
             attachments = []
@@ -125,7 +134,6 @@ def register(bot: aiomax.Bot) -> None:
             new_msgs.append(msg.id)
 
         # Навигационное сообщение
-        total_pages = (total - 1) // ITEMS_PER_PAGE + 1
         nav_kb = KeyboardBuilder()
         nav_row = []
         if page > 0:
@@ -139,7 +147,10 @@ def register(bot: aiomax.Bot) -> None:
 
         nav_text = f"**{category}** (стр. {page+1}/{total_pages})"
         nav_msg = await cb.send(nav_text, keyboard=nav_kb, format="markdown")
-        _catalog_messages[user_id] = new_msgs + [nav_msg.id]
+        new_msgs.append(nav_msg.id)
+
+        # Сохраняем id всех сообщений (товаров и навигации)
+        _catalog_messages[user_id] = new_msgs
 
     # Гарантированное удаление каталога при нажатии "Главное меню"
     @bot.on_button_callback("menu:main")
@@ -147,7 +158,7 @@ def register(bot: aiomax.Bot) -> None:
         user_id = cb.user.user_id
         await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
 
-    # ------------------- Заказ -----------------------
+    # ------------------- Заказ (без резервирования в корзине) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("order:start:"))
     async def start_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         product_id = int(cb.payload.split(":")[-1])
@@ -160,13 +171,7 @@ def register(bot: aiomax.Bot) -> None:
             await cb.answer(notification="❌ Товар недоступен.")
             return
 
-        # Удаляем предыдущее сообщение (список товаров)
-        try:
-            await cb.message.delete()
-        except Exception:
-            pass
-
-        # Формируем карточку товара
+        # Собираем фото / видео
         attachments = []
         if product.photo_ids:
             for t in product.photo_ids.split(","):
@@ -183,15 +188,15 @@ def register(bot: aiomax.Bot) -> None:
         text += f"\n\nЦена {product.price:.0f}"
         text += "\n\n✏️ Введите количество:"
 
-        # Отправляем карточку и запоминаем её message_id
-        msg = await cb.send(
-            text,
+        # Редактируем текущее сообщение (товар) -> карточка с фото и полем ввода
+        await cb.answer(
+            text=text,
             attachments=attachments,
             keyboard=kb_back_to_menu(),
             format="markdown"
         )
         cursor.change_state("order_qty")
-        cursor.change_data({"product_id": product_id, "card_msg_id": msg.id})
+        cursor.change_data({"product_id": product_id, "card_msg_id": cb.message.id})
 
     @bot.on_message(filters.state("order_qty"))
     async def handle_order_qty(message: aiomax.Message, cursor: fsm.FSMCursor):
@@ -243,55 +248,61 @@ def register(bot: aiomax.Bot) -> None:
                 cursor.clear()
                 return
 
-            if product.stock is not None and qty > product.stock:
-                if card_msg_id:
-                    await bot.edit_message(
-                        message_id=card_msg_id,
-                        text=f"❌ Недостаточно товара. В наличии: {product.stock} шт.",
-                        keyboard=kb_back_to_menu()
-                    )
-                else:
-                    await message.reply(
-                        f"❌ Недостаточно товара. В наличии: {product.stock} шт.",
-                        keyboard=kb_back_to_menu()
-                    )
-                cursor.clear()
-                return
-
+            # Получаем текущую корзину и смотрим, сколько этого товара уже есть
+            order = await get_or_create_draft(session, user_id)
+            existing_qty = 0
             from sqlalchemy.orm import selectinload
             from db import Order, OrderItem
-            order = await get_or_create_draft(session, user_id)
             stmt = select(Order).where(Order.id == order.id).options(
                 selectinload(Order.items).selectinload(OrderItem.product)
             )
             order = (await session.execute(stmt)).scalar_one()
+            for item in order.items:
+                if item.product_id == product_id:
+                    existing_qty = item.quantity
+                    break
+
+            total_qty = existing_qty + qty
+
+            if product.stock is not None and total_qty > product.stock:
+                msg = (f"❌ Недостаточно товара. В наличии: {product.stock} шт."
+                       + (f", у вас в корзине уже {existing_qty} шт." if existing_qty else ""))
+                if card_msg_id:
+                    await bot.edit_message(message_id=card_msg_id, text=msg, keyboard=kb_back_to_menu())
+                else:
+                    await message.reply(msg, keyboard=kb_back_to_menu())
+                cursor.clear()
+                return
+
             await add_item_to_order(session, order, product, qty)
             order = (await session.execute(stmt)).scalar_one()
-
             cart_text = f"✅ **{product.name}** × {qty} шт. добавлен в корзину!\n\n{format_cart(order)}"
 
         cursor.clear()
 
         if card_msg_id:
-            # Редактируем то же сообщение: убираем фото, показываем корзину
+            # Убираем фото, показываем только корзину
             await bot.edit_message(
                 message_id=card_msg_id,
                 text=cart_text,
                 keyboard=kb_cart_actions(order.id),
-                attachments=[],  # обязательно убираем фото
+                attachments=[],  # <-- обязательно убираем фото
                 format="markdown"
             )
         else:
             await message.reply(cart_text, keyboard=kb_cart_actions(order.id), format="markdown")
-
     # ------------------- Поиск по артикулу -----------------------
     @bot.on_button_callback("search:article")
     async def search_article_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
         cursor.change_state("search_article")
         await cb.answer(notification=" ")
-        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
-        await cb.send("🔎 Введите артикул:", keyboard=kb_back_to_menu())
+        await delete_catalog_messages(user_id, bot)
+        await cb.answer(
+            text="🔎 Введите артикул:",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
 
     @bot.on_message(filters.state("search_article"))
     async def search_article_result(message: aiomax.Message, cursor: fsm.FSMCursor):

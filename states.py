@@ -20,3 +20,8 @@ class UserStates:
     AWAITING_ADDRESS = "awaiting_address"
     AWAITING_RECEIPT = "awaiting_receipt"
     CONTACT_ADMIN = "contact_admin"
+    EDITING_PHONE = "editing_phone"
+    EDITING_DELIVERY = "editing_delivery"
+    EDITING_ADDRESS = "editing_address"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+

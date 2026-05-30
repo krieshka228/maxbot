@@ -193,10 +193,10 @@ async def upsert_product(
     product = result.scalar_one_or_none()
 
     if product is None:
-        # Для нового товара: если stock не указан, ставим 0 и скрываем
+        # Новый товар: если stock не указан, ставим 0 и скрываем
         if stock is None:
             stock = 0
-        is_active = stock > 0 or in_stock  # если stock=0, то скрыт
+        is_active = stock > 0 or in_stock
         product = Product(
             post_id=post_id,
             name=name,
@@ -212,13 +212,12 @@ async def upsert_product(
         )
         session.add(product)
     else:
-        # Для существующего товара: если stock не передан, ставим 0 и скрываем
-        if stock is None:
-            stock = 0
-        product.stock = stock
-        product.is_active = stock > 0
-        product.in_stock = stock > 0
-
+        # Существующий товар: обновляем stock только если передан не None
+        if stock is not None:
+            product.stock = stock
+            product.is_active = stock > 0
+            product.in_stock = stock > 0
+        # Остальные поля обновляем всегда
         product.name = name
         product.price = price
         product.photo_ids = photo_ids
@@ -226,6 +225,8 @@ async def upsert_product(
         product.article = article
         product.category = category
         product.description = description
+        product.in_stock = in_stock
+        # is_active не трогаем, если stock не менялся, чтобы не сломать ручное управление
 
     await session.commit()
     await session.refresh(product)

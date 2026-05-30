@@ -1,7 +1,7 @@
 """
 handlers/cart.py — корзина: просмотр, удаление, изменение количества, оформление заказа.
 Оформление происходит одним сообщением: сразу показываются реквизиты.
-Все операции проверяют остаток товара (stock).
+Атомарное резервирование выполняется при оформлении.
 """
 
 import logging
@@ -9,6 +9,7 @@ import logging
 import aiomax
 from aiomax import fsm, filters
 from aiomax.buttons import KeyboardBuilder, CallbackButton
+from sqlalchemy import text
 
 from config import PAYMENT_DETAILS
 from db import (
@@ -37,31 +38,29 @@ def register(bot: aiomax.Bot) -> None:
         user_id = cb.user.user_id
         await cb.answer(notification=" ")
 
-        # Удаляем старое сообщение с корзиной
-        try:
-            await cb.message.delete()
-        except Exception:
-            pass
-
         async for session in get_session():
             user = await get_or_create_user(session, user_id)
             if not user.consented:
-                await cb.send("❌ Сначала дайте согласие на обработку данных (/start).")
+                await cb.answer(
+                    text="❌ Сначала дайте согласие на обработку данных (/start).",
+                    keyboard=kb_back_to_menu(),
+                    format="markdown"
+                )
                 return
             order = await get_draft_order(session, user_id)
 
         if order is None or not order.items:
-            await cb.send(
-                "🛒 Ваша корзина пуста.\n\n"
-                "Перейдите в каталог и добавьте товары.",
+            await cb.answer(
+                text="🛒 Ваша корзина пуста.\n\nПерейдите в каталог и добавьте товары.",
                 keyboard=kb_back_to_menu(),
+                format="markdown"
             )
             return
 
-        await cb.send(
-            format_cart(order),
-            format="markdown",
+        await cb.answer(
+            text=format_cart(order),
             keyboard=kb_cart_actions(order.id, has_items=True),
+            format="markdown"
         )
 
     # ── Удалить позицию (выбор) ───────────────────────────────────────────────
@@ -71,9 +70,9 @@ def register(bot: aiomax.Bot) -> None:
         async for session in get_session():
             order = await get_draft_order(session, cb.user.user_id)
         if not order or not order.items:
-            await cb.send("🛒 Корзина пуста.")
+            await cb.answer(text="🛒 Корзина пуста.", keyboard=kb_back_to_menu())
             return
-        await cb.send("Выберите позицию для удаления:", keyboard=kb_cart_items_remove(order))
+        await cb.answer(text="Выберите позицию для удаления:", keyboard=kb_cart_items_remove(order))
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:del_item:"))
     async def cart_delete_item(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -82,21 +81,22 @@ def register(bot: aiomax.Bot) -> None:
         async for session in get_session():
             order = await get_draft_order(session, cb.user.user_id)
             if not order:
-                await cb.send("🛒 Корзина пуста.")
+                await cb.answer(text="🛒 Корзина пуста.", keyboard=kb_back_to_menu())
                 return
+
             removed = await remove_item_from_order(session, order, item_id)
             if removed:
                 await session.refresh(order)
                 if order.items:
-                    await cb.send(
-                        "✅ Удалено.\n\n" + format_cart(order),
-                        format="markdown",
+                    await cb.answer(
+                        text="✅ Удалено.\n\n" + format_cart(order),
                         keyboard=kb_cart_actions(order.id),
+                        format="markdown"
                     )
                 else:
-                    await cb.send("✅ Удалено. Корзина пуста.", keyboard=kb_back_to_menu())
+                    await cb.answer(text="✅ Удалено. Корзина пуста.", keyboard=kb_back_to_menu(), format="markdown")
             else:
-                await cb.send("❌ Позиция не найдена.")
+                await cb.answer(text="❌ Позиция не найдена.", keyboard=kb_back_to_menu())
 
     # ── Изменить количество ───────────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:edit:"))
@@ -170,7 +170,7 @@ def register(bot: aiomax.Bot) -> None:
             product = item.product
             new_qty = item.quantity + delta
 
-            # Проверка остатка
+            # Проверка остатка (stock не трогаем — резервирование при оформлении)
             if product and product.stock is not None and new_qty > product.stock:
                 await cb.answer(notification=f"❌ Доступно только {product.stock} шт.")
                 return
@@ -260,13 +260,12 @@ def register(bot: aiomax.Bot) -> None:
         )
         cursor.clear()
 
-    # ── Оформить заказ (одно сообщение) ────────────────────────────────────────
+    # ── Оформить заказ (атомарное резервирование здесь) ─────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:checkout:"))
     async def cart_checkout(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
         await cb.answer(notification=" ")
 
-        # Удаляем сообщение с корзиной
         try:
             await cb.message.delete()
         except Exception:
@@ -278,23 +277,37 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("🛒 Корзина пуста.")
                 return
 
-            # Проверка остатков для всех позиций
+            # Проверка остатков и атомарное резервирование
             for item in order.items:
                 product = item.product
-                if product and product.stock is not None and item.quantity > product.stock:
-                    await cb.send(
-                        f"❌ Товар «{product.name}» доступен в количестве {product.stock} шт. "
-                        f"У вас в корзине {item.quantity} шт. Пожалуйста, измените количество.",
-                        keyboard=kb_cart_actions(order.id),
-                        format="markdown"
+                if product and product.stock is not None:
+                    if item.quantity > product.stock:
+                        await cb.send(
+                            f"❌ Товар «{product.name}» доступен в количестве {product.stock} шт. "
+                            f"У вас в корзине {item.quantity} шт. Пожалуйста, измените количество.",
+                            keyboard=kb_cart_actions(order.id),
+                            format="markdown"
+                        )
+                        return
+                    # Атомарное списание
+                    result = await session.execute(
+                        text("UPDATE products SET stock = stock - :qty WHERE id = :id AND stock >= :qty"),
+                        {"qty": item.quantity, "id": product.id}
                     )
-                    return
+                    if result.rowcount == 0:
+                        await cb.send(
+                            f"❌ Товар «{product.name}» только что закончился.",
+                            keyboard=kb_cart_actions(order.id),
+                            format="markdown"
+                        )
+                        return
+                    await session.refresh(product, attribute_names=["stock"])
 
             order.status = OrderStatus.pending
             await session.commit()
 
         cart_text = format_cart(order)
-        text = (
+        msg_text = (
             f"✅ **Заказ #{order.id} оформлен!**\n\n"
             f"{cart_text}\n\n"
             f"💳 **Реквизиты для оплаты:**\n{PAYMENT_DETAILS}\n\n"
@@ -306,4 +319,4 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        await cb.send(text, keyboard=kb, format="markdown")
+        await cb.send(msg_text, keyboard=kb, format="markdown")

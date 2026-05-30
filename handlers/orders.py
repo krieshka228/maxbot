@@ -28,9 +28,7 @@ def register(bot: aiomax.Bot) -> None:
     async def orders_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
         await cb.answer(notification=" ")
-        # Удаляем все сообщения каталога
         await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
-
         async for session in get_session():
             from sqlalchemy import select
             from db import Order
@@ -47,7 +45,11 @@ def register(bot: aiomax.Bot) -> None:
             orders = result.scalars().all()
 
         if not orders:
-            await cb.send("📋 У вас пока нет оформленных заказов.", keyboard=kb_back_to_menu())
+            await cb.answer(
+                text="📋 У вас пока нет оформленных заказов.",
+                keyboard=kb_back_to_menu(),
+                format="markdown"
+            )
             return
 
         lines = ["📋 **Ваши заказы:**\n"]
@@ -60,9 +62,18 @@ def register(bot: aiomax.Bot) -> None:
                 + (f"\n  Адрес: {order.delivery_address}" if order.delivery_address else "")
             )
 
-        await cb.send("\n".join(lines), format="markdown", keyboard=kb_back_to_menu())
+        await cb.answer(
+            text="\n".join(lines),
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
+
     @bot.on_button_callback("contact:admin")
     async def contact_admin_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         cursor.change_state(UserStates.CONTACT_ADMIN)
         await cb.answer(notification=" ")
-        await cb.send("✉️ Напишите ваш вопрос — передадим администратору:")
+        await cb.answer(
+            text="✉️ Напишите ваш вопрос — передадим администратору:",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )

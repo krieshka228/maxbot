@@ -5,6 +5,8 @@ handlers/fsm_inputs.py — обработчики текстовых и callback
   - Ввод адреса доставки
   - Приём фото чека
   - Сообщение администратору
+  - Редактирование данных перед сохранением
+  - Финальное подтверждение заказа с одной кнопкой «Изменить заказ»
 """
 
 import logging
@@ -51,15 +53,15 @@ def register(bot: aiomax.Bot) -> None:
             user.phone = phone
             await session.commit()
 
-        # Переходим к выбору способа доставки
-        cursor.change_state(UserStates.AWAITING_DELIVERY_METHOD)
-        cursor.change_data({"order_id": order_id})
-
+        # Показываем выбор доставки
         kb = KeyboardBuilder()
         kb.add(CallbackButton("Озон", "delivery:ozon"))
         kb.row(CallbackButton("Яндекс", "delivery:yandex"))
         kb.row(CallbackButton("СДЭК до ПВЗ", "delivery:cdek"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
+
+        cursor.change_state(UserStates.AWAITING_DELIVERY_METHOD)
+        cursor.change_data({"order_id": order_id})
         await message.reply("🚚 Выберите способ доставки:", keyboard=kb)
 
     # ── Обработчик выбора способа доставки (callback) ─────────────────────
@@ -83,6 +85,7 @@ def register(bot: aiomax.Bot) -> None:
                 order.delivery_method = delivery_name
                 await session.commit()
 
+        # Показываем ввод адреса
         cursor.change_state(UserStates.AWAITING_ADDRESS)
         cursor.change_data({"order_id": order_id})
         await cb.answer(notification=" ")
@@ -114,20 +117,8 @@ def register(bot: aiomax.Bot) -> None:
             user.address = address
             await session.commit()
 
-        async for session in get_session():
-            order = await get_order_with_items(session, order_id)
-            if not order or order.user_id != user_id:
-                cursor.clear()
-                await message.reply("❌ Заказ не найден.")
-                return
-            order.delivery_address = address
-            user = await get_or_create_user(session, user_id)
-            user.address = address
-            await session.commit()
-
-            # Формируем сообщение для администратора
-            user_info = f"{user.full_name or 'Без имени'} (ID {user.id})"
-            phone = user.phone or "не указан"
+            # Формируем сводку для финального подтверждения
+            phone = order.contact_phone or "не указан"
             delivery_method = order.delivery_method or "не выбран"
             items_lines = []
             for item in order.items:
@@ -135,29 +126,82 @@ def register(bot: aiomax.Bot) -> None:
                 items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
             items_text = "\n".join(items_lines)
 
-            admin_text = (
-                f"📦 **Заказ #{order_id} готов к отправке**\n\n"
-                f"👤 Клиент: {user_info}\n"
+            # Клавиатура: одна кнопка «Изменить заказ» и одна «Всё верно»
+            kb = KeyboardBuilder()
+            kb.add(CallbackButton("✏️ Изменить заказ", "edit:order"))
+            kb.row(CallbackButton("✅ Всё верно, оформить", "confirm:final"))
+
+            cursor.change_state(UserStates.AWAITING_CONFIRMATION)
+            cursor.change_data({"order_id": order_id})
+            await message.reply(
+                f"📋 **Проверьте данные заказа #{order_id}:**\n\n"
                 f"📱 Телефон: {phone}\n"
                 f"🚚 Доставка: {delivery_method}\n"
                 f"📍 Адрес: {address}\n\n"
                 f"🛒 **Товары:**\n{items_text}\n\n"
-                f"💰 **Итого: {order.total_amount:.0f} ₽**"
+                f"💰 **Итого: {order.total_amount:.0f} ₽**\n\n"
+                "Если всё верно, нажмите «✅ Всё верно, оформить».",
+                keyboard=kb,
+                format="markdown"
             )
 
-            try:
-                await bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=admin_text,
-                    format="markdown"
-                )
-            except Exception as e:
-                logger.error(f"Не удалось отправить уведомление администратору: {e}")
+    # ── Обработчик кнопки "Изменить заказ" ─────────────────────────────
+    @bot.on_button_callback("edit:order")
+    async def edit_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Возвращает пользователя к вводу телефона, чтобы он мог заново заполнить все данные."""
+        cursor.change_state(UserStates.AWAITING_PHONE)
+        await cb.answer(notification=" ")
+        await cb.send("📱 Введите ваш номер телефона для связи:", keyboard=kb_back_to_menu())
+
+    # ── Обработчик подтверждения "Всё верно, оформить" ──────────────────
+    @bot.on_button_callback("confirm:final")
+    async def confirm_final(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        user_id = cb.user.user_id
+        data = cursor.get_data() or {}
+        order_id = data.get("order_id")
+
+        async for session in get_session():
+            order = await get_order_with_items(session, order_id)
+            if not order or order.user_id != user_id:
+                cursor.clear()
+                await cb.send("❌ Заказ не найден.")
+                return
+
+        # Отправляем уведомление администратору
+        user = order.user
+        phone = order.contact_phone or "не указан"
+        delivery_method = order.delivery_method or "не выбран"
+        address = order.delivery_address or "не указан"
+        items_lines = []
+        for item in order.items:
+            product_name = item.product.name if item.product else f"Товар #{item.product_id}"
+            items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
+        items_text = "\n".join(items_lines)
+
+        admin_text = (
+            f"📦 **Заказ #{order_id} готов к отправке**\n\n"
+            f"👤 Клиент: {user.full_name or 'Без имени'} (ID {user.id})\n"
+            f"📱 Телефон: {phone}\n"
+            f"🚚 Доставка: {delivery_method}\n"
+            f"📍 Адрес: {address}\n\n"
+            f"🛒 **Товары:**\n{items_text}\n\n"
+            f"💰 **Итого: {order.total_amount:.0f} ₽**"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=admin_text,
+                format="markdown"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление администратору: {e}")
 
         cursor.clear()
-        await message.reply(
-            f"✅ Адрес сохранён!\n\nЗаказ #{order_id} принят в работу!",
-            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
+        await cb.answer(notification=" ")
+        await cb.send(
+            f"✅ Заказ #{order_id} оформлен! Данные сохранены.",
+            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID))
         )
 
     # ── Приём фото чека ───────────────────────────────────────────────────
@@ -191,8 +235,9 @@ def register(bot: aiomax.Bot) -> None:
 
             order_info = format_order_for_admin(order)
 
-        # Уведомляем администратора
+        # Уведомляем администратора с фото чека
         try:
+            receipt_attachment = aiomax.PhotoAttachment(token=file_id)
             await bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=(
@@ -201,6 +246,7 @@ def register(bot: aiomax.Bot) -> None:
                     "Проверьте оплату:"
                 ),
                 format="markdown",
+                attachments=receipt_attachment,
                 keyboard=kb_admin_confirm_payment(order_id),
             )
         except Exception as e:

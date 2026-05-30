@@ -29,6 +29,7 @@ from keyboards import (
 )
 from api import fetch_channel_messages
 from utils import parse_post_product
+from .catalog import delete_catalog_messages
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,12 @@ def register(bot: aiomax.Bot) -> None:
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
+        user_id = cb.user.user_id
+        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
         await cb.answer(
-            text="⚙️ **Админ-меню:**",
+            text="⚙️ **Админ‑меню:**",
             keyboard=kb_admin_menu(),
+            attachments=[],  # убираем возможные вложения
             format="markdown"
         )
 

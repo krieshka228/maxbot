@@ -10,7 +10,7 @@ from aiomax import fsm
 from config import ADMIN_CHAT_ID, ADMIN_USER_ID, PAYMENT_DETAILS
 from db import get_session, get_draft_order, get_order_with_items, OrderStatus
 from keyboards import kb_payment, kb_admin_confirm_payment, kb_back_to_menu
-from utils import format_cart, format_order_for_admin, update_channel_post
+from utils import format_cart, format_order_for_admin
 from states import UserStates
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,10 @@ def register(bot: aiomax.Bot) -> None:
             order = await get_order_with_items(session, order_id)
             if order and order.user_id == cb.user.user_id:
                 order.status = OrderStatus.cancelled
+                # Возвращаем остатки на склад
+                for item in order.items:
+                    if item.product and item.product.stock is not None:
+                        item.product.stock += item.quantity
                 await session.commit()
                 await cb.send(
                     f"❌ Заказ #{order_id} отменён.",
@@ -77,13 +81,8 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("❌ Заказ не найден.")
                 return
             order.status = OrderStatus.confirmed
-            for item in order.items:
-                product = item.product
-                if product and product.stock is not None:
-                    product.stock = max(0, product.stock - item.quantity)
-                    await update_channel_post(bot, product)
 
-            # Помечаем все товары в заказе как "нет в наличии"
+            # Помечаем все товары в заказе как "нет в наличии" (для штучных товаров)
             for item in order.items:
                 if item.product:
                     item.product.in_stock = False
@@ -93,7 +92,7 @@ def register(bot: aiomax.Bot) -> None:
             await session.commit()
             client_id = order.user_id
 
-        # Уведомляем клиента и запрашиваем адрес
+        # Уведомляем клиента и запрашиваем телефон
         bot.storage.change_state(client_id, UserStates.AWAITING_PHONE)
         bot.storage.change_data(client_id, {"order_id": order_id})
         await bot.send_message(
@@ -119,7 +118,7 @@ def register(bot: aiomax.Bot) -> None:
             client_id = order.user_id
 
         await bot.send_message(
-            chat_id=client_id,
+            user_id=client_id,  # было chat_id — исправлено
             text=(
                 f"❌ Оплата заказа #{order_id} не подтверждена.\n"
                 "Проверьте реквизиты и попробуйте снова или напишите администратору."

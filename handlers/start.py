@@ -193,26 +193,16 @@ def register(bot: aiomax.Bot) -> None:
     async def back_to_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
         cursor.clear()
-        # Удаляем все сообщения каталога, но не трогаем текущее (будем редактировать)
-        await delete_catalog_messages(user_id, bot)
+        # Очищаем каталог (если были открыты товары)
+        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
 
-        # Если в текущем сообщении есть вложения (фото) – удалим его и отправим новое меню
-        if cb.message and cb.message.body and cb.message.body.attachments:
-            try:
-                await cb.message.delete()
-            except Exception:
-                pass
-            await cb.send(
-                "🏠 Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
-            )
-        else:
-            # Иначе просто отредактируем текущее сообщение (останется одно)
-            await cb.answer(
-                text="🏠 Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
-                format="markdown"
-            )
+        # Всегда редактируем текущее сообщение, убирая фото и ставя меню
+        await cb.answer(
+            text="🏠 Главное меню:",
+            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
+            attachments=[],  # <-- обязательно убираем вложения (фото)
+            format="markdown"
+        )
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         await ctx.reply(f"Ваш user_id: {ctx.sender.user_id}")

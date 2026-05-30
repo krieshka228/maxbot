@@ -40,6 +40,20 @@ async def patched_post(self, url, **kwargs):
     kwargs["headers"] = headers
     return await _original_post(self, url, **kwargs)
 
+_original_put = Bot.put
+
+async def patched_put(self, url, **kwargs):
+    params = kwargs.get("params", {})
+    if isinstance(params, dict):
+        params.pop("access_token", None)
+    kwargs["params"] = params
+    headers = kwargs.get("headers", {})
+    headers["Authorization"] = self.access_token
+    kwargs["headers"] = headers
+    return await _original_put(self, url, **kwargs)
+
+Bot.put = patched_put
+
 Bot.get = patched_get
 Bot.post = patched_post
 # --------------------------------------------------------------------------------------
