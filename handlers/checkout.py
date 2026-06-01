@@ -8,7 +8,7 @@ import aiomax
 from aiomax import fsm
 
 from config import ADMIN_CHAT_ID, ADMIN_USER_ID, PAYMENT_DETAILS
-from db import get_session, get_draft_order, get_order_with_items, OrderStatus
+from db import get_session, get_draft_order, get_order_with_items, OrderStatus, get_bot_setting
 from keyboards import kb_payment, kb_admin_confirm_payment, kb_back_to_menu
 from utils import format_cart, format_order_for_admin
 from states import UserStates
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def register(bot: aiomax.Bot) -> None:
+    # В файле handlers/checkout.py
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("checkout:confirm:"))
     async def checkout_confirm(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -29,14 +30,27 @@ def register(bot: aiomax.Bot) -> None:
             order.status = OrderStatus.pending
             await session.commit()
 
+        # --- Блок добавления QR-кода ---
+        attachments = []
+        async for session in get_session():
+            qr_token = await get_bot_setting(session, "payment_qr_token")
+        if qr_token:
+            attachments.append(aiomax.PhotoAttachment(token=qr_token))
+        # -----------------------------
+
         cart_text = format_cart(order)
-        await cb.send(
+        msg_text = (
             f"✅ **Заказ #{order.id} оформлен!**\n\n"
             f"{cart_text}\n\n"
             f"💳 **Реквизиты для оплаты:**\n{PAYMENT_DETAILS}\n\n"
-            "После оплаты нажмите кнопку ниже и пришлите фото чека.",
+            "После оплаты нажмите кнопку ниже и пришлите фото чека."
+        )
+
+        await cb.send(
+            msg_text,
             format="markdown",
             keyboard=kb_payment(order.id),
+            attachments=attachments if attachments else None
         )
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("payment:receipt:"))

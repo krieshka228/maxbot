@@ -12,6 +12,7 @@ import aiomax
 from aiomax import fsm, filters
 from aiomax.buttons import KeyboardBuilder, CallbackButton
 
+
 from config import ADMIN_USER_ID, CHANNEL_ID
 from db import (
     get_session,
@@ -20,6 +21,8 @@ from db import (
     Product,
     User,
     upsert_product,
+    set_bot_setting,
+    get_bot_setting,
 )
 from excel_reports import build_monthly_report, build_clients_excel
 from keyboards import (
@@ -30,9 +33,12 @@ from keyboards import (
 from api import fetch_channel_messages
 from utils import parse_post_product
 from .catalog import delete_catalog_messages
+from states import UserStates
 
 logger = logging.getLogger(__name__)
 
+ITEMS_PER_PAGE = 5           # товаров на странице
+CATEGORIES_PER_PAGE = 5      # категорий на странице
 
 def register(bot: aiomax.Bot) -> None:
 
@@ -210,7 +216,7 @@ def register(bot: aiomax.Bot) -> None:
 
         await cb.answer(notification="⏳ Синхронизирую...")
         try:
-            messages = await fetch_channel_messages(CHANNEL_ID, limit=50)
+            messages = await fetch_channel_messages(CHANNEL_ID, limit=200)
         except Exception as e:
             await cb.answer(
                 text=f"❌ Ошибка получения постов: {e}",
@@ -308,12 +314,20 @@ def register(bot: aiomax.Bot) -> None:
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
-        await show_stock_categories(cb)
+        await show_stock_categories(cb, page=0)
 
-    async def show_stock_categories(cb: aiomax.Callback):
+    async def show_stock_categories(cb: aiomax.Callback, page: int = 0):
         async for session in get_session():
+            # Получаем общее количество категорий
+            total_cats = (await session.execute(
+                select(func.count(Product.category.distinct())).where(Product.category != None)
+            )).scalar()
+            # Получаем категории для текущей страницы
             categories = (await session.execute(
-                select(Product.category).where(Product.category != None).distinct()
+                select(Product.category).where(Product.category != None)
+                .distinct()
+                .order_by(Product.category)
+                .offset(page * CATEGORIES_PER_PAGE).limit(CATEGORIES_PER_PAGE)
             )).scalars().all()
 
         kb = KeyboardBuilder()
@@ -322,11 +336,30 @@ def register(bot: aiomax.Bot) -> None:
             await cb.answer(text="📭 Нет товаров.", keyboard=kb, format="markdown")
             return
 
+        total_pages = (total_cats - 1) // CATEGORIES_PER_PAGE + 1
+        header = f"**Категории** (стр. {page + 1}/{total_pages})"
         for cat in categories:
             kb.add(CallbackButton(cat, f"admin:stock_category:{cat}"))
             kb.row()
-        kb.add(CallbackButton("⚙️ Админ-меню", "admin:menu"))
-        await cb.answer(text="**Выберите категорию для остатков:**", keyboard=kb, format="markdown")
+
+        # Навигационные кнопки для категорий
+        nav = []
+        if page > 0:
+            nav.append(CallbackButton("← Назад", f"admin:stock_catlist_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav.append(CallbackButton("Вперёд →", f"admin:stock_catlist_page:{page + 1}"))
+        if nav:
+            kb.row(*nav)
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        await cb.answer(text=header, keyboard=kb, format="markdown")
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_catlist_page:"))
+    async def stock_catlist_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        page = int(cb.payload.split(":")[-1])
+        await show_stock_categories(cb, page)
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_category:"))
     async def stock_category_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -436,3 +469,76 @@ def register(bot: aiomax.Bot) -> None:
                 keyboard=kb_admin_menu()
             )
         cursor.clear()
+
+    # ------------------- Управление QR-кодом оплаты -----------------------
+    @bot.on_button_callback("admin:payment_qr")
+    async def admin_payment_qr_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        kb = KeyboardBuilder()
+        kb.add(CallbackButton("🖼 Загрузить QR-код", "admin:upload_qr"))
+        kb.row(CallbackButton("👀 Показать текущий", "admin:show_qr"))
+        kb.row(CallbackButton("🗑 Удалить QR-код", "admin:delete_qr"))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        await cb.answer(
+            text="**Управление QR-кодом для оплаты**",
+            keyboard=kb,
+            format="markdown"
+        )
+
+    @bot.on_button_callback("admin:upload_qr")
+    async def admin_upload_qr_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state(UserStates.ADMIN_PAYMENT_QR)
+        await cb.answer(notification=" ")
+        await cb.send("📷 Пришлите PNG-изображение с QR-кодом:", keyboard=kb_back_to_menu())
+
+    @bot.on_message(filters.state(UserStates.ADMIN_PAYMENT_QR))
+    async def admin_upload_qr_finish(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        file_id = None
+        if message.body and hasattr(message.body, "attachments") and message.body.attachments:
+            for att in message.body.attachments:
+                if att.type == "image" and hasattr(att, "token") and att.token:
+                    file_id = att.token
+                    break
+        if not file_id:
+            await message.reply("❌ Пришлите изображение в формате PNG.", keyboard=kb_back_to_menu())
+            return
+
+        async for session in get_session():
+            await set_bot_setting(session, "payment_qr_token", file_id)
+        cursor.clear()
+        await message.reply(
+            "✅ QR-код сохранён. Теперь он будет показываться покупателям при оформлении заказа.",
+            keyboard=kb_admin_menu()
+        )
+
+    @bot.on_button_callback("admin:show_qr")
+    async def admin_show_qr(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        async for session in get_session():
+            token = await get_bot_setting(session, "payment_qr_token")
+        if not token:
+            await cb.answer(notification="QR-код не задан.")
+            return
+        await cb.send(
+            attachments=aiomax.PhotoAttachment(token=token),
+            keyboard=kb_back_to_menu()
+        )
+        await cb.answer(notification=" ")
+
+    @bot.on_button_callback("admin:delete_qr")
+    async def admin_delete_qr(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        async for session in get_session():
+            await set_bot_setting(session, "payment_qr_token", "")
+        await cb.answer(notification="QR-код удалён.")

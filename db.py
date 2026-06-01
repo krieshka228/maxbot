@@ -133,6 +133,12 @@ class OrderItem(Base):
     order: Mapped["Order"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship(back_populates="items")
 
+class BotSetting(Base):
+    __tablename__ = "bot_settings"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=True)
+
+
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -150,6 +156,19 @@ async def get_or_create_user(session: AsyncSession, user_id: int, **kwargs) -> U
         session.add(result)
         await session.commit()
     return result
+
+async def get_bot_setting(session: AsyncSession, key: str) -> str | None:
+    result = await session.get(BotSetting, key)
+    return result.value if result else None
+
+async def set_bot_setting(session: AsyncSession, key: str, value: str):
+    setting = await session.get(BotSetting, key)
+    if not setting:
+        setting = BotSetting(key=key, value=value)
+        session.add(setting)
+    else:
+        setting.value = value
+    await session.commit()
 
 
 async def get_draft_order(session: AsyncSession, user_id: int) -> Order | None:

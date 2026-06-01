@@ -26,7 +26,7 @@ from keyboards import (
     kb_back_to_menu,
 )
 from utils import format_cart
-
+from db import get_bot_setting
 logger = logging.getLogger(__name__)
 
 
@@ -261,6 +261,8 @@ def register(bot: aiomax.Bot) -> None:
         cursor.clear()
 
     # ── Оформить заказ (атомарное резервирование здесь) ─────────────────────────
+    # В файле handlers/cart.py
+
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:checkout:"))
     async def cart_checkout(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
@@ -306,6 +308,14 @@ def register(bot: aiomax.Bot) -> None:
             order.status = OrderStatus.pending
             await session.commit()
 
+        # --- Блок добавления QR-кода ---
+        attachments = []
+        async for session in get_session():
+            qr_token = await get_bot_setting(session, "payment_qr_token")
+        if qr_token:
+            attachments.append(aiomax.PhotoAttachment(token=qr_token))
+        # -----------------------------
+
         cart_text = format_cart(order)
         msg_text = (
             f"✅ **Заказ #{order.id} оформлен!**\n\n"
@@ -319,4 +329,4 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        await cb.send(msg_text, keyboard=kb, format="markdown")
+        await cb.send(msg_text, keyboard=kb, attachments=attachments if attachments else None, format="markdown")

@@ -75,6 +75,7 @@ def kb_admin_menu() -> KeyboardBuilder:
     kb.add(CallbackButton("📊 Заказы за месяц", "admin:excel:summary"))
     kb.row(CallbackButton("👥 База клиентов", "admin:excel:clients"))
     kb.row(CallbackButton("🔄 Синхронизировать товары", "admin:sync"))
+    kb.row(CallbackButton("💳 Реквизиты", "admin:payment_qr"))
     kb.row(CallbackButton("📦 Изменить остаток", "admin:set_stock_list"))
     kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
     return kb

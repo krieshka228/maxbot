@@ -17,6 +17,7 @@ class UserStates:
     CART_CHANGE_QTY = "cart_change_qty"
     AWAITING_DELIVERY_METHOD = "awaiting_delivery_method"
     AWAITING_PHONE = "awaiting_phone"
+    ADMIN_PAYMENT_QR = "admin_payment_qr"
     AWAITING_ADDRESS = "awaiting_address"
     AWAITING_RECEIPT = "awaiting_receipt"
     CONTACT_ADMIN = "contact_admin"
