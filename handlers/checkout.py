@@ -95,14 +95,6 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("❌ Заказ не найден.")
                 return
             order.status = OrderStatus.confirmed
-
-            # Помечаем все товары в заказе как "нет в наличии" (для штучных товаров)
-            for item in order.items:
-                if item.product:
-                    item.product.in_stock = False
-                    item.product.is_active = False
-                    logger.info(f"Товар скрыт (продан): {item.product.name}")
-
             await session.commit()
             client_id = order.user_id
 
@@ -114,7 +106,6 @@ def register(bot: aiomax.Bot) -> None:
             text="📱 Введите ваш номер телефона для связи:"
         )
         await cb.send(f"✅ Заказ #{order_id} подтверждён. Ожидаем телефон от клиента.")
-
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:pay_fail:"))
     async def admin_pay_fail(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:

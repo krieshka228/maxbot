@@ -45,7 +45,7 @@ async def fetch_channel_messages(chat_id: int, limit: int = 200) -> list[dict]:
     """
     url = f"{BASE_URL}/messages"
     headers = {"Authorization": BOT_TOKEN}
-    params = {"chat_id": chat_id, "count": min(limit, 200)}  # API может иметь ограничение на count
+    params = {"chat_id": chat_id, "count": min(limit, 100)}  # API может иметь ограничение на count
     all_messages = []
 
     async with aiohttp.ClientSession() as session:

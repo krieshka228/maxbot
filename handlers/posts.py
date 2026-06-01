@@ -87,29 +87,22 @@ def register(bot: aiomax.Bot) -> None:
     async def new_post(message: aiomax.Message, cursor: fsm.FSMCursor):
         await _sync_post(bot, message)
 
-    @bot.on_message(lambda msg: _is_channel_post(msg), detect_commands=True)
-    async def new_post(message: aiomax.Message, cursor: fsm.FSMCursor):
-        logger.info(
-            f"===== НОВЫЙ ПОСТ: id={message.id}, text={message.body.text[:100] if message.body and message.body.text else 'нет текста'}")
-        await _sync_post(bot, message)
-
     @bot.on_message_edit(lambda msg: _is_channel_post(msg))
     async def edited_post(before: aiomax.Message, after: aiomax.Message, cursor: fsm.FSMCursor):
         await _sync_post(bot, after)
 
-    # ── Обработка удаления поста ─────────────────────────────────────────
+    # ── Обработка удаления поста – теперь товар удаляется полностью ──────
     @bot.on_message_delete(lambda payload: payload.chat_id == CHANNEL_ID)
     async def on_post_deleted(payload: aiomax.MessageDeletePayload, cursor: fsm.FSMCursor):
         message_id = payload.message_id
         if not message_id:
             return
         async for session in get_session():
-            from sqlalchemy import select
+            from sqlalchemy import select, delete
             product = (await session.execute(
                 select(Product).where(Product.post_id == message_id)
             )).scalar_one_or_none()
             if product:
-                product.in_stock = False
-                product.is_active = False
+                await session.delete(product)
                 await session.commit()
-                logger.info(f"Товар скрыт (удалён пост): {product.name}")
+                logger.info(f"Товар удалён из базы: {product.name}")

@@ -216,7 +216,7 @@ def register(bot: aiomax.Bot) -> None:
 
         await cb.answer(notification="⏳ Синхронизирую...")
         try:
-            messages = await fetch_channel_messages(CHANNEL_ID, limit=200)
+            messages = await fetch_channel_messages(CHANNEL_ID, limit=100)
         except Exception as e:
             await cb.answer(
                 text=f"❌ Ошибка получения постов: {e}",

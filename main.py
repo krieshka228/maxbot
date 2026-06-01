@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import aiohttp
 import aiomax
 from aiomax.bot import Bot
 
@@ -18,9 +17,9 @@ logger = logging.getLogger(__name__)
 # ------------------- Патч методов Bot для авторизации через заголовок -------------------
 _original_get = Bot.get
 _original_post = Bot.post
+_original_put = Bot.put
 
 async def patched_get(self, url, **kwargs):
-    # Убираем access_token из параметров и добавляем заголовок
     params = kwargs.get("params", {})
     if isinstance(params, dict):
         params.pop("access_token", None)
@@ -40,8 +39,6 @@ async def patched_post(self, url, **kwargs):
     kwargs["headers"] = headers
     return await _original_post(self, url, **kwargs)
 
-_original_put = Bot.put
-
 async def patched_put(self, url, **kwargs):
     params = kwargs.get("params", {})
     if isinstance(params, dict):
@@ -52,11 +49,28 @@ async def patched_put(self, url, **kwargs):
     kwargs["headers"] = headers
     return await _original_put(self, url, **kwargs)
 
-Bot.put = patched_put
-
 Bot.get = patched_get
 Bot.post = patched_post
-# --------------------------------------------------------------------------------------
+Bot.put = patched_put
+
+# ------------------- Патч для сообщений канала (без sender) -------------------
+_original_handle_update = Bot.handle_update
+
+async def patched_handle_update(self, update: dict):
+    if "message" in update and not update["message"].get("sender"):
+        update["message"]["sender"] = {
+            "user_id": 0,
+            "name": "Channel",
+            "first_name": "Channel",
+            "last_name": "",
+            "username": None,
+            "is_bot": True,
+            "last_activity_time": 0,
+        }
+    await _original_handle_update(self, update)
+
+Bot.handle_update = patched_handle_update
+# ------------------------------------------------------------------------------
 
 async def main():
     logger.info("Инициализация базы данных...")
