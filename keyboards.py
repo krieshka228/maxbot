@@ -14,12 +14,13 @@ def kb_consent() -> aiomax.buttons.KeyboardBuilder:
     return kb
 
 
-def kb_main_menu(is_admin: bool = False) -> aiomax.buttons.KeyboardBuilder:
+def kb_main_menu(is_admin: bool = False, has_qr: bool = True) -> aiomax.buttons.KeyboardBuilder:
     kb = buttons.KeyboardBuilder()
-    kb.add(buttons.CallbackButton("🛍 Каталог", "catalog:show"))
-    kb.row(buttons.CallbackButton("🔎 Поиск по артикулу", "search:article"))
-    kb.row(buttons.CallbackButton("🛒 Моя корзина", "cart:view"))
-    kb.row(buttons.CallbackButton("📋 Мои заказы", "orders:list"))
+    if is_admin or has_qr:
+        kb.add(buttons.CallbackButton("🛍 Каталог", "catalog:show"))
+        kb.row(buttons.CallbackButton("🔎 Поиск по артикулу", "search:article"))
+        kb.row(buttons.CallbackButton("🛒 Моя корзина", "cart:view"))
+        kb.row(buttons.CallbackButton("📋 Мои заказы", "orders:list"))
     kb.row(buttons.CallbackButton("✉️ Написать администратору", "contact:admin"))
     if is_admin:
         kb.row(buttons.CallbackButton("⚙️ Админ-меню", "admin:menu"))

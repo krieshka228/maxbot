@@ -12,6 +12,7 @@ from db import get_session, get_draft_order, get_order_with_items, OrderStatus, 
 from keyboards import kb_payment, kb_admin_confirm_payment, kb_back_to_menu
 from utils import format_cart, format_order_for_admin
 from states import UserStates
+from utils import check_payment_qr
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ def register(bot: aiomax.Bot) -> None:
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("payment:receipt:"))
     async def payment_receipt_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         order_id = int(cb.payload.split(":")[-1])
         cursor.change_state(UserStates.AWAITING_RECEIPT)
         cursor.change_data({"order_id": order_id})
@@ -63,6 +67,9 @@ def register(bot: aiomax.Bot) -> None:
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("payment:cancel:"))
     async def payment_cancel(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         order_id = int(cb.payload.split(":")[-1])
         await cb.answer(notification=" ")
         async for session in get_session():

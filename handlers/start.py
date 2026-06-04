@@ -9,7 +9,7 @@ import aiomax
 from aiomax import fsm
 from utils import parse_quantity, format_cart
 from config import ADMIN_USER_ID
-from db import get_session, get_or_create_user, get_or_create_draft, add_item_to_order
+from db import get_session, get_or_create_user, get_or_create_draft, add_item_to_order, get_bot_setting
 from keyboards import kb_consent, kb_main_menu, kb_cart_actions, kb_back_to_menu
 
 
@@ -81,6 +81,10 @@ async def _direct_order(message: aiomax.Message, cursor: fsm.FSMCursor, bot: aio
             keyboard=kb_cart_actions(order.id)
         )
 
+async def check_payment_qr() -> bool:
+    async for session in get_session():
+        token = await get_bot_setting(session, "payment_qr_token")
+        return bool(token)
 
 def register(bot: aiomax.Bot) -> None:
 
@@ -115,6 +119,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_bot_start()
     async def on_bot_start(payload: aiomax.BotStartPayload, cursor: fsm.FSMCursor):
         user_id = payload.user.user_id
+        has_qr = await check_payment_qr()
         async for session in get_session():
             user = await get_or_create_user(
                 session, user_id,
@@ -133,7 +138,7 @@ def register(bot: aiomax.Bot) -> None:
             cursor.clear()
             await payload.send(
                 "👋 С возвращением! Выберите действие:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
+                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
             )
 
     # ── Команда /start ───────────────────────────────────────────────────────
@@ -141,6 +146,7 @@ def register(bot: aiomax.Bot) -> None:
     async def cmd_start(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         logger.info("Обработчик /start вызван")
         user_id = ctx.sender.user_id
+        has_qr = await check_payment_qr()
         async for session in get_session():
             user = await get_or_create_user(
                 session, user_id,
@@ -149,24 +155,23 @@ def register(bot: aiomax.Bot) -> None:
             )
         if not user.consented:
             cursor.change_state("consent")
-            logger.info("Попытка отправить главное меню")
             await ctx.reply(
                 "👋 Привет! Для продолжения нужно ваше согласие на обработку "
                 "персональных данных.",
                 keyboard=kb_consent(),
             )
         else:
-            logger.info("Попытка отправить главное меню")
             cursor.clear()
             await ctx.reply(
                 "✅ Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
+                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
             )
 
     # ── Согласие ─────────────────────────────────────────────────────────────
     @bot.on_button_callback("consent:yes")
     async def consent_yes(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
+        has_qr = await check_payment_qr()
         async for session in get_session():
             user = await get_or_create_user(session, user_id)
             user.consented = True
@@ -175,16 +180,8 @@ def register(bot: aiomax.Bot) -> None:
         cursor.clear()
         await cb.answer(
             text="✅ Спасибо! Теперь вы можете делать заказы.",
-            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
+            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
             format="markdown"
-        )
-
-    @bot.on_button_callback("consent:no")
-    async def consent_no(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        await cb.answer(
-            text="❌ Без согласия на обработку персональных данных работа с ботом невозможна.\n"
-                 "Если передумаете — нажмите /start.",
-            keyboard=kb_back_to_menu()
         )
 
     # ── Главное меню (кнопка «Назад») ────────────────────────────────────────
@@ -192,17 +189,24 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback("menu:main")
     async def back_to_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
+        has_qr = await check_payment_qr()
         cursor.clear()
-        # Очищаем каталог (если были открыты товары)
-        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
-
-        # Всегда редактируем текущее сообщение, убирая фото и ставя меню
-        await cb.answer(
-            text="🏠 Главное меню:",
-            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
-            attachments=[],  # <-- обязательно убираем вложения (фото)
-            format="markdown"
-        )
+        await delete_catalog_messages(user_id, bot)
+        if cb.message and cb.message.body and cb.message.body.attachments:
+            try:
+                await cb.message.delete()
+            except Exception:
+                pass
+            await cb.send(
+                "🏠 Главное меню:",
+                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
+            )
+        else:
+            await cb.answer(
+                text="🏠 Главное меню:",
+                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
+                format="markdown"
+            )
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         await ctx.reply(f"Ваш user_id: {ctx.sender.user_id}")

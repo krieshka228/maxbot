@@ -74,6 +74,11 @@ def format_cart(order) -> str:
     lines.append(f"\n💰 **Итого: {order.total_amount:.0f} ₽**")
     return "\n".join(lines)
 
+async def check_payment_qr() -> bool:
+    from db import get_session, get_bot_setting
+    async for session in get_session():
+        token = await get_bot_setting(session, "payment_qr_token")
+        return bool(token)
 
 def format_order_for_admin(order) -> str:
     """Форматирует заказ для уведомления администратора."""

@@ -11,6 +11,7 @@ from config import ADMIN_USER_ID
 from db import get_session, OrderStatus
 from keyboards import kb_back_to_menu, kb_main_menu
 from states import UserStates
+from utils import check_payment_qr
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +27,14 @@ STATUS_LABEL = {
 def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback("orders:list")
     async def orders_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.user.user_id
+        # Блокировка, если нет QR-кода и пользователь не админ
+        if cb.message.sender.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
+
+        user_id = cb.message.sender.user_id
         await cb.answer(notification=" ")
-        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
+
         async for session in get_session():
             from sqlalchemy import select
             from db import Order

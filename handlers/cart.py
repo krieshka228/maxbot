@@ -2,6 +2,7 @@
 handlers/cart.py — корзина: просмотр, удаление, изменение количества, оформление заказа.
 Оформление происходит одним сообщением: сразу показываются реквизиты.
 Атомарное резервирование выполняется при оформлении.
+Добавлена блокировка при отсутствии QR-кода для не-админов.
 """
 
 import logging
@@ -25,8 +26,9 @@ from keyboards import (
     kb_cart_items_remove,
     kb_back_to_menu,
 )
-from utils import format_cart
+from utils import format_cart, check_payment_qr
 from db import get_bot_setting
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +37,13 @@ def register(bot: aiomax.Bot) -> None:
     # ── Просмотр корзины ──────────────────────────────────────────────────────
     @bot.on_button_callback("cart:view")
     async def view_cart(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.user.user_id
+        user_id = cb.message.sender.user_id
+
+        # Блокировка, если нет QR-кода и пользователь не админ
+        if user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
+
         await cb.answer(notification=" ")
 
         async for session in get_session():
@@ -66,9 +74,10 @@ def register(bot: aiomax.Bot) -> None:
     # ── Удалить позицию (выбор) ───────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:remove:"))
     async def cart_remove_choose(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        user_id = cb.message.sender.user_id
         await cb.answer(notification=" ")
         async for session in get_session():
-            order = await get_draft_order(session, cb.user.user_id)
+            order = await get_draft_order(session, user_id)
         if not order or not order.items:
             await cb.answer(text="🛒 Корзина пуста.", keyboard=kb_back_to_menu())
             return
@@ -77,9 +86,10 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:del_item:"))
     async def cart_delete_item(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
+        user_id = cb.message.sender.user_id
         await cb.answer(notification=" ")
         async for session in get_session():
-            order = await get_draft_order(session, cb.user.user_id)
+            order = await get_draft_order(session, user_id)
             if not order:
                 await cb.answer(text="🛒 Корзина пуста.", keyboard=kb_back_to_menu())
                 return
@@ -101,7 +111,7 @@ def register(bot: aiomax.Bot) -> None:
     # ── Изменить количество ───────────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:edit:"))
     async def cart_edit_choose(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.user.user_id
+        user_id = cb.message.sender.user_id
         async for session in get_session():
             order = await get_draft_order(session, user_id)
         if not order or not order.items:
@@ -119,10 +129,10 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:change_qty:"))
     async def cart_change_qty_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
+        user_id = cb.message.sender.user_id
         cursor.change_state("cart_change_qty")
         cursor.change_data({"item_id": item_id})
 
-        user_id = cb.user.user_id
         async for session in get_session():
             order = await get_draft_order(session, user_id)
             if not order:
@@ -155,7 +165,7 @@ def register(bot: aiomax.Bot) -> None:
         _, _, item_id, delta = cb.payload.split(":")
         item_id = int(item_id)
         delta = int(delta)
-        user_id = cb.user.user_id
+        user_id = cb.message.sender.user_id
 
         async for session in get_session():
             order = await get_draft_order(session, user_id)
@@ -170,7 +180,6 @@ def register(bot: aiomax.Bot) -> None:
             product = item.product
             new_qty = item.quantity + delta
 
-            # Проверка остатка (stock не трогаем — резервирование при оформлении)
             if product and product.stock is not None and new_qty > product.stock:
                 await cb.answer(notification=f"❌ Доступно только {product.stock} шт.")
                 return
@@ -201,6 +210,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:input:"))
     async def cart_input_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
+        user_id = cb.message.sender.user_id
         cursor.change_state("cart_change_qty")
         cursor.change_data({"item_id": item_id})
         await cb.answer(notification=" ")
@@ -238,7 +248,6 @@ def register(bot: aiomax.Bot) -> None:
                 return
 
             product = item.product
-            # Проверка остатка
             if product and product.stock is not None and new_qty > product.stock:
                 await message.reply(
                     f"❌ Недостаточно товара. В наличии: {product.stock} шт.",
@@ -260,12 +269,16 @@ def register(bot: aiomax.Bot) -> None:
         )
         cursor.clear()
 
-    # ── Оформить заказ (атомарное резервирование здесь) ─────────────────────────
-    # В файле handlers/cart.py
-
+    # ── Оформить заказ (атомарное резервирование + проверка QR) ───────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:checkout:"))
     async def cart_checkout(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.user.user_id
+        user_id = cb.message.sender.user_id
+
+        # Блокировка, если нет QR-кода и пользователь не админ
+        if user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
+
         await cb.answer(notification=" ")
 
         try:
@@ -314,7 +327,6 @@ def register(bot: aiomax.Bot) -> None:
             qr_token = await get_bot_setting(session, "payment_qr_token")
         if qr_token:
             attachments.append(aiomax.PhotoAttachment(token=qr_token))
-        # -----------------------------
 
         cart_text = format_cart(order)
         msg_text = (

@@ -11,7 +11,9 @@ from aiomax.buttons import KeyboardBuilder, CallbackButton
 from sqlalchemy import select, func, text
 from db import get_session, Product, get_or_create_user, get_or_create_draft, add_item_to_order
 from keyboards import kb_cart_actions, kb_back_to_menu
-from utils import format_cart, parse_quantity
+from utils import format_cart, parse_quantity, check_payment_qr
+from config import ADMIN_USER_ID
+
 
 logger = logging.getLogger(__name__)
 ITEMS_PER_PAGE = 3
@@ -36,11 +38,17 @@ def register(bot: aiomax.Bot) -> None:
     # ------------------- Показ категорий -----------------------
     @bot.on_button_callback("catalog:show")
     async def catalog_show_categories(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         user_id = cb.user.user_id
         await delete_catalog_messages(user_id, bot)
         await show_categories(cb)
 
     async def show_categories(cb: aiomax.Callback):
+        if not await check_payment_qr() and cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         async for session in get_session():
             categories = (await session.execute(
                 select(Product.category).where(
@@ -64,6 +72,9 @@ def register(bot: aiomax.Bot) -> None:
     # ------------------- Товары в категории (пагинация) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
     async def catalog_category_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         category = cb.payload.split(":", 2)[2]
         user_id = cb.user.user_id
         await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
@@ -71,6 +82,9 @@ def register(bot: aiomax.Bot) -> None:
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:catpage:"))
     async def catalog_catpage(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         parts = cb.payload.split(":")
         category = parts[2]
         page = int(parts[3])
@@ -161,6 +175,9 @@ def register(bot: aiomax.Bot) -> None:
     # ------------------- Заказ (без резервирования в корзине) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("order:start:"))
     async def start_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         product_id = int(cb.payload.split(":")[-1])
 
         product = None
@@ -294,6 +311,9 @@ def register(bot: aiomax.Bot) -> None:
     # ------------------- Поиск по артикулу -----------------------
     @bot.on_button_callback("search:article")
     async def search_article_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            return
         user_id = cb.user.user_id
         cursor.change_state("search_article")
         await cb.answer(notification=" ")
