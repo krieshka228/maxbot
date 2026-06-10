@@ -94,7 +94,7 @@ def register(bot: aiomax.Bot) -> None:
             keyboard=kb_back_to_menu()
         )
 
-    # ── Ввод адреса доставки ──────────────────────────────────────────────
+    # ── Ввод адреса доставки (теперь НЕ сохраняет сразу) ────────────────
     @bot.on_message(filters.state(UserStates.AWAITING_ADDRESS))
     async def handle_address(message: aiomax.Message, cursor: fsm.FSMCursor):
         user_id = message.sender.user_id
@@ -106,18 +106,17 @@ def register(bot: aiomax.Bot) -> None:
         data = cursor.get_data() or {}
         order_id = data.get("order_id")
 
+        # Сохраняем адрес пока только в FSM, не пишем в базу
+        cursor.change_data({"order_id": order_id, "address": address})
+        cursor.change_state(UserStates.AWAITING_CONFIRMATION)
+
+        # Получаем текущие данные заказа для отображения
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order or order.user_id != user_id:
                 cursor.clear()
                 await message.reply("❌ Заказ не найден.")
                 return
-            order.delivery_address = address
-            user = await get_or_create_user(session, user_id)
-            user.address = address
-            await session.commit()
-
-            # Формируем сводку для финального подтверждения
             phone = order.contact_phone or "не указан"
             delivery_method = order.delivery_method or "не выбран"
             items_lines = []
@@ -126,13 +125,10 @@ def register(bot: aiomax.Bot) -> None:
                 items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
             items_text = "\n".join(items_lines)
 
-            # Клавиатура: одна кнопка «Изменить заказ» и одна «Всё верно»
             kb = KeyboardBuilder()
             kb.add(CallbackButton("✏️ Изменить заказ", "edit:order"))
             kb.row(CallbackButton("✅ Всё верно, оформить", "confirm:final"))
 
-            cursor.change_state(UserStates.AWAITING_CONFIRMATION)
-            cursor.change_data({"order_id": order_id})
             await message.reply(
                 f"📋 **Проверьте данные заказа #{order_id}:**\n\n"
                 f"📱 Телефон: {phone}\n"
@@ -159,6 +155,7 @@ def register(bot: aiomax.Bot) -> None:
         user_id = cb.user.user_id
         data = cursor.get_data() or {}
         order_id = data.get("order_id")
+        address = data.get("address")
 
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
@@ -167,41 +164,45 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("❌ Заказ не найден.")
                 return
 
-        # Отправляем уведомление администратору
-        user = order.user
-        phone = order.contact_phone or "не указан"
-        delivery_method = order.delivery_method or "не выбран"
-        address = order.delivery_address or "не указан"
-        items_lines = []
-        for item in order.items:
-            product_name = item.product.name if item.product else f"Товар #{item.product_id}"
-            items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
-        items_text = "\n".join(items_lines)
+            # Сохраняем адрес окончательно
+            order.delivery_address = address
+            user = await get_or_create_user(session, user_id)
+            user.address = address
+            await session.commit()
 
-        admin_text = (
-            f"📦 **Заказ #{order_id} готов к отправке**\n\n"
-            f"👤 Клиент: {user.full_name or 'Без имени'} (ID {user.id})\n"
-            f"📱 Телефон: {phone}\n"
-            f"🚚 Доставка: {delivery_method}\n"
-            f"📍 Адрес: {address}\n\n"
-            f"🛒 **Товары:**\n{items_text}\n\n"
-            f"💰 **Итого: {order.total_amount:.0f} ₽**"
-        )
+            # Уведомление администратору
+            phone = order.contact_phone or "не указан"
+            delivery_method = order.delivery_method or "не выбран"
+            items_lines = []
+            for item in order.items:
+                product_name = item.product.name if item.product else f"Товар #{item.product_id}"
+                items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
+            items_text = "\n".join(items_lines)
 
-        try:
-            await bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=admin_text,
-                format="markdown"
+            admin_text = (
+                f"📦 **Заказ #{order_id} готов к отправке**\n\n"
+                f"👤 Клиент: {user.full_name or 'Без имени'} (ID {user.id})\n"
+                f"📱 Телефон: {phone}\n"
+                f"🚚 Доставка: {delivery_method}\n"
+                f"📍 Адрес: {address}\n\n"
+                f"🛒 **Товары:**\n{items_text}\n\n"
+                f"💰 **Итого: {order.total_amount:.0f} ₽**"
             )
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление администратору: {e}")
+
+            try:
+                await bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=admin_text,
+                    format="markdown"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить администратора: {e}")
 
         cursor.clear()
         await cb.answer(notification=" ")
         await cb.send(
             f"✅ Заказ #{order_id} оформлен! Данные сохранены.",
-            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID))
+            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID)),
         )
 
     # ── Приём фото чека ───────────────────────────────────────────────────

@@ -3,13 +3,13 @@ handlers/orders.py — история заказов и контакт с адм
 """
 
 import logging
-from .catalog import delete_catalog_messages
 import aiomax
-from aiomax import fsm
+from aiomax import fsm, filters
+from aiomax.buttons import KeyboardBuilder, CallbackButton, ChatButton
 
-from config import ADMIN_USER_ID
+from config import ADMIN_USER_ID, ADMIN_CHAT_ID
 from db import get_session, OrderStatus
-from keyboards import kb_back_to_menu, kb_main_menu
+from keyboards import kb_back_to_menu, kb_unavailable, kb_main_menu
 from states import UserStates
 from utils import check_payment_qr
 
@@ -27,12 +27,16 @@ STATUS_LABEL = {
 def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback("orders:list")
     async def orders_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        # Блокировка, если нет QR-кода и пользователь не админ
-        if cb.message.sender.user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+        user_id = cb.message.sender.user_id
+
+        if user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
             return
 
-        user_id = cb.message.sender.user_id
         await cb.answer(notification=" ")
 
         async for session in get_session():
@@ -59,6 +63,7 @@ def register(bot: aiomax.Bot) -> None:
             return
 
         lines = ["📋 **Ваши заказы:**\n"]
+        kb = KeyboardBuilder()
         for order in orders:
             label = STATUS_LABEL.get(order.status.value, order.status.value)
             qty = sum(i.quantity for i in order.items)
@@ -68,18 +73,18 @@ def register(bot: aiomax.Bot) -> None:
                 + (f"\n  Адрес: {order.delivery_address}" if order.delivery_address else "")
             )
 
-        await cb.answer(
-            text="\n".join(lines),
-            keyboard=kb_back_to_menu(),
-            format="markdown"
-        )
+            if order.status == OrderStatus.pending:
+                kb.add(CallbackButton(f"💳 Оплатить #{order.id}", f"payment:receipt:{order.id}", intent='default'))
+                kb.row(CallbackButton(f"❌ Отменить #{order.id}", f"payment:cancel:{order.id}", intent='default'))
+            # Для других статусов кнопок не добавляем
+
+        kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
+        await cb.answer(text="\n".join(lines), keyboard=kb, format="markdown")
+
+    from aiomax import ContactAttachment  # добавьте в импорты
 
     @bot.on_button_callback("contact:admin")
     async def contact_admin_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         cursor.change_state(UserStates.CONTACT_ADMIN)
         await cb.answer(notification=" ")
-        await cb.answer(
-            text="✉️ Напишите ваш вопрос — передадим администратору:",
-            keyboard=kb_back_to_menu(),
-            format="markdown"
-        )
+        await cb.send("✉️ Напишите ваш вопрос — передадим администратору:")

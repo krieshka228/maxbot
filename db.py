@@ -88,13 +88,15 @@ class Product(Base):
     article: Mapped[str | None] = mapped_column(String(32), nullable=True)
     in_stock: Mapped[bool] = mapped_column(Boolean, default=True)
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)   # <-- вот это добавьте
+    level1_category: Mapped[str | None] = mapped_column(String(64), nullable=True)  # <-- ДОБАВЛЕНО
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
     items: Mapped[list["OrderItem"]] = relationship(back_populates="product")
+
 
 class Order(Base):
     __tablename__ = "orders"
@@ -133,11 +135,11 @@ class OrderItem(Base):
     order: Mapped["Order"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship(back_populates="items")
 
+
 class BotSetting(Base):
     __tablename__ = "bot_settings"
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=True)
-
 
 
 # ── Init ──────────────────────────────────────────────────────────────────────
@@ -150,16 +152,26 @@ async def init_db() -> None:
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 async def get_or_create_user(session: AsyncSession, user_id: int, **kwargs) -> User:
-    result = await session.get(User, user_id)
-    if result is None:
-        result = User(id=user_id, **kwargs)
-        session.add(result)
+    user = await session.get(User, user_id)
+    if user is None:
+        user = User(id=user_id, **kwargs)
+        session.add(user)
         await session.commit()
-    return result
+    else:
+        updated = False
+        for key, value in kwargs.items():
+            if value is not None and value != '' and getattr(user, key, None) != value:
+                setattr(user, key, value)
+                updated = True
+        if updated:
+            await session.commit()
+    return user
+
 
 async def get_bot_setting(session: AsyncSession, key: str) -> str | None:
     result = await session.get(BotSetting, key)
     return result.value if result else None
+
 
 async def set_bot_setting(session: AsyncSession, key: str, value: str):
     setting = await session.get(BotSetting, key)
@@ -202,6 +214,7 @@ async def upsert_product(
     photo_ids: str | None,
     video_ids: str | None = None,
     article: str | None = None,
+    level1_category: str | None = None,        # <-- ДОБАВЛЕНО
     category: str | None = None,
     description: str | None = None,
     in_stock: bool = True,
@@ -223,6 +236,7 @@ async def upsert_product(
             photo_ids=photo_ids,
             video_ids=video_ids,
             article=article,
+            level1_category=level1_category,     # <-- ДОБАВЛЕНО
             category=category,
             description=description,
             in_stock=in_stock,
@@ -242,14 +256,17 @@ async def upsert_product(
         product.photo_ids = photo_ids
         product.video_ids = video_ids
         product.article = article
+        if level1_category is not None:           # <-- ДОБАВЛЕНО
+            product.level1_category = level1_category
         product.category = category
         product.description = description
         product.in_stock = in_stock
-        # is_active не трогаем, если stock не менялся, чтобы не сломать ручное управление
 
     await session.commit()
     await session.refresh(product)
     return product
+
+
 async def add_item_to_order(
     session: AsyncSession, order: Order, product: Product, qty: int
 ) -> OrderItem:

@@ -20,12 +20,15 @@ from db import (
     remove_item_from_order,
     recalculate_total,
     OrderStatus,
+    Product,
 )
 from keyboards import (
     kb_cart_actions,
     kb_cart_items_remove,
     kb_back_to_menu,
+    kb_unavailable,
 )
+from config import ADMIN_USER_ID
 from utils import format_cart, check_payment_qr
 from db import get_bot_setting
 
@@ -37,44 +40,39 @@ def register(bot: aiomax.Bot) -> None:
     # ── Просмотр корзины ──────────────────────────────────────────────────────
     @bot.on_button_callback("cart:view")
     async def view_cart(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
 
-        # Блокировка, если нет QR-кода и пользователь не админ
+        # Администратор всегда может пользоваться корзиной
         if user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
             return
 
         await cb.answer(notification=" ")
 
         async for session in get_session():
-            user = await get_or_create_user(session, user_id)
-            if not user.consented:
-                await cb.answer(
-                    text="❌ Сначала дайте согласие на обработку данных (/start).",
-                    keyboard=kb_back_to_menu(),
-                    format="markdown"
-                )
-                return
             order = await get_draft_order(session, user_id)
 
         if order is None or not order.items:
-            await cb.answer(
+            await cb.send(
                 text="🛒 Ваша корзина пуста.\n\nПерейдите в каталог и добавьте товары.",
                 keyboard=kb_back_to_menu(),
-                format="markdown"
             )
             return
 
-        await cb.answer(
+        await cb.send(
             text=format_cart(order),
+            format="markdown",
             keyboard=kb_cart_actions(order.id, has_items=True),
-            format="markdown"
         )
 
     # ── Удалить позицию (выбор) ───────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:remove:"))
     async def cart_remove_choose(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
         await cb.answer(notification=" ")
         async for session in get_session():
             order = await get_draft_order(session, user_id)
@@ -86,7 +84,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:del_item:"))
     async def cart_delete_item(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
         await cb.answer(notification=" ")
         async for session in get_session():
             order = await get_draft_order(session, user_id)
@@ -111,7 +109,7 @@ def register(bot: aiomax.Bot) -> None:
     # ── Изменить количество ───────────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:edit:"))
     async def cart_edit_choose(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
         async for session in get_session():
             order = await get_draft_order(session, user_id)
         if not order or not order.items:
@@ -129,7 +127,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:change_qty:"))
     async def cart_change_qty_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
         cursor.change_state("cart_change_qty")
         cursor.change_data({"item_id": item_id})
 
@@ -165,7 +163,7 @@ def register(bot: aiomax.Bot) -> None:
         _, _, item_id, delta = cb.payload.split(":")
         item_id = int(item_id)
         delta = int(delta)
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
 
         async for session in get_session():
             order = await get_draft_order(session, user_id)
@@ -210,7 +208,7 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:input:"))
     async def cart_input_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         item_id = int(cb.payload.split(":")[-1])
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
         cursor.change_state("cart_change_qty")
         cursor.change_data({"item_id": item_id})
         await cb.answer(notification=" ")
@@ -272,15 +270,34 @@ def register(bot: aiomax.Bot) -> None:
     # ── Оформить заказ (атомарное резервирование + проверка QR) ───────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:checkout:"))
     async def cart_checkout(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.message.sender.user_id
+        user_id = cb.user.user_id
 
-        # Блокировка, если нет QR-кода и пользователь не админ
+        # Клиент без QR – блокировка
         if user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
+            return
+
+        # Администратор без QR – предупреждение, но не блокировка (заказ не оформляется)
+        if user_id == ADMIN_USER_ID and not await check_payment_qr():
+            try:
+                await cb.message.delete()
+            except Exception:
+                pass
+            kb = KeyboardBuilder()
+            kb.add(CallbackButton("💳 Реквизиты", "admin:payment_qr", intent='default'))
+            kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
+            await cb.send(
+                text="⚠️ **Реквизиты не указаны.**\n\nЗагрузите QR‑код в разделе «Реквизиты» админ‑меню.",
+                keyboard=kb,
+                format="markdown"
+            )
             return
 
         await cb.answer(notification=" ")
-
         try:
             await cb.message.delete()
         except Exception:
@@ -292,7 +309,6 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("🛒 Корзина пуста.")
                 return
 
-            # Проверка остатков и атомарное резервирование
             for item in order.items:
                 product = item.product
                 if product and product.stock is not None:
@@ -316,7 +332,11 @@ def register(bot: aiomax.Bot) -> None:
                             format="markdown"
                         )
                         return
-                    await session.refresh(product, attribute_names=["stock"])
+                    # Обновляем атрибут product.stock актуальным значением из базы
+                    from sqlalchemy import select
+                    stmt = select(Product.stock).where(Product.id == product.id)
+                    new_stock = (await session.execute(stmt)).scalar()
+                    product.stock = new_stock
 
             order.status = OrderStatus.pending
             await session.commit()
@@ -332,13 +352,12 @@ def register(bot: aiomax.Bot) -> None:
         msg_text = (
             f"✅ **Заказ #{order.id} оформлен!**\n\n"
             f"{cart_text}\n\n"
-            f"💳 **Реквизиты для оплаты:**\n{PAYMENT_DETAILS}\n\n"
             "После оплаты нажмите кнопку ниже и пришлите фото чека."
         )
 
         kb = KeyboardBuilder()
-        kb.add(CallbackButton("💳 Я оплатил — отправить чек", f"payment:receipt:{order.id}"))
-        kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}"))
-        kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
+        kb.add(CallbackButton("💳 Я оплатил — отправить чек", f"payment:receipt:{order.id}", intent='default'))
+        kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}", intent='default'))
+        kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
 
         await cb.send(msg_text, keyboard=kb, attachments=attachments if attachments else None, format="markdown")

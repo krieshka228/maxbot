@@ -27,7 +27,7 @@ async def _sync_post(bot: aiomax.Bot, message: aiomax.Message) -> None:
         return
 
     text = message.body.text
-    name, article, price, category, description, stock = parse_post_product(text)
+    name, article, price, level1_category, category, description, stock = parse_post_product(text)
     if name is None:
         return
 
@@ -72,7 +72,8 @@ async def _sync_post(bot: aiomax.Bot, message: aiomax.Message) -> None:
     async for session in get_session():
         await upsert_product(
             session, post_id, name, price, photo_ids, video_ids,
-            article, category, description, stock=stock, in_stock=in_stock
+            article, level1_category=level1_category, category=category,
+            description=description, stock=stock, in_stock=in_stock
         )
         logger.info(
             f"Товар обновлён: id={post_id} '{name}' {price}₽ "

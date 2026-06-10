@@ -12,7 +12,6 @@ import aiomax
 from aiomax import fsm, filters
 from aiomax.buttons import KeyboardBuilder, CallbackButton
 
-
 from config import ADMIN_USER_ID, CHANNEL_ID
 from db import (
     get_session,
@@ -26,9 +25,9 @@ from db import (
 )
 from excel_reports import build_monthly_report, build_clients_excel
 from keyboards import (
-    kb_admin_menu,
     kb_back_to_menu,
     kb_admin_confirm_payment,
+    kb_admin_menu,
 )
 from api import fetch_channel_messages
 from utils import parse_post_product
@@ -37,25 +36,75 @@ from states import UserStates
 
 logger = logging.getLogger(__name__)
 
-ITEMS_PER_PAGE = 5           # товаров на странице
-CATEGORIES_PER_PAGE = 5      # категорий на странице
+ITEMS_PER_PAGE = 5
+CATEGORIES_PER_PAGE = 5
 
 def register(bot: aiomax.Bot) -> None:
-
-    # ------------------- Админ-меню -----------------------
-    @bot.on_button_callback("admin:menu")
-    async def admin_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+    # ------------------- Поиск по артикулу в управлении остатками -----------------------
+    @bot.on_button_callback("admin:stock_search_article")
+    async def stock_search_article_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
-        user_id = cb.user.user_id
-        await delete_catalog_messages(user_id, bot, also_delete_message_id=cb.message.id)
-        await cb.answer(
-            text="⚙️ **Админ‑меню:**",
-            keyboard=kb_admin_menu(),
-            attachments=[],  # убираем возможные вложения
+        cursor.change_state("admin_stock_search_article")
+        await cb.answer(notification=" ")
+        await cb.send("🔎 Введите артикул товара для изменения остатка:", keyboard=kb_back_to_menu())
+
+    @bot.on_message(filters.state("admin_stock_search_article"))
+    async def stock_search_article_result(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        article = message.body.text.strip() if message.body and message.body.text else ""
+        if not article:
+            await message.reply("❌ Введите артикул.", keyboard=kb_back_to_menu())
+            return
+
+        async for session in get_session():
+            product = (await session.execute(
+                select(Product).where(Product.article == article)
+            )).scalar_one_or_none()
+            break
+
+        if not product:
+            await message.reply("🔎 Товар с таким артикулом не найден.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        # Сразу предлагаем изменить остаток
+        cursor.change_state("admin_set_stock")
+        cursor.change_data({"product_id": product.id})
+        await message.reply(
+            f"Товар: **{product.name}**\nАртикул: {product.article}\nТекущий остаток: {product.stock or 0}\n\n"
+            "✏️ Введите новое количество (целое число) или 0, чтобы скрыть товар:",
+            keyboard=kb_back_to_menu(),
             format="markdown"
         )
+    # ------------------- Админ-меню -----------------------
+    @bot.on_button_callback("admin:menu")
+    async def admin_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        user_id = cb.user.user_id
+        if user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+
+        # Пытаемся отредактировать текущее сообщение (если оно уже содержит intent)
+        try:
+            await cb.answer(
+                text="⚙️ **Админ‑меню:**",
+                keyboard=kb_admin_menu(),
+                format="markdown"
+            )
+        except aiomax.exceptions.InternalError:
+            # Если не получилось (старое сообщение), удаляем и отправляем новое
+            try:
+                await cb.message.delete()
+            except Exception:
+                pass
+            await cb.send(
+                text="⚙️ **Админ‑меню:**",
+                keyboard=kb_admin_menu(),
+                format="markdown"
+            )
 
     # ------------------- Заказы за месяц (Excel) -----------------------
     @bot.on_button_callback("admin:excel:summary")
@@ -93,7 +142,7 @@ def register(bot: aiomax.Bot) -> None:
         if not orders:
             await cb.answer(
                 text="📊 За последний месяц нет заказов.",
-                keyboard=kb_admin_menu(),
+                keyboard=kb_back_to_menu(),   # kb_back_to_menu работает, т.к. это просто кнопка "Назад"
                 format="markdown"
             )
             return
@@ -105,6 +154,7 @@ def register(bot: aiomax.Bot) -> None:
         try:
             file_attachment = await bot.upload_file(excel_bytes, filename="monthly_report.xlsx")
             await cb.send(attachments=file_attachment)
+            # Показываем клавиатуру админ‑меню, которую мы создали выше
             await cb.answer(
                 text=f"📊 Отчёт за месяц: {count_orders} заказов, {count_users} клиентов.",
                 keyboard=kb_admin_menu(),
@@ -307,24 +357,82 @@ def register(bot: aiomax.Bot) -> None:
         )
 
     # ------------------- Изменение остатка (stock) -----------------------
+    # ------------------- Изменение остатка (stock) -----------------------
     ITEMS_PER_PAGE = 5
+    CATEGORIES_PER_PAGE = 5
 
     @bot.on_button_callback("admin:set_stock_list")
     async def set_stock_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
-        await show_stock_categories(cb, page=0)
+        await show_stock_level1(cb, page=0)
 
-    async def show_stock_categories(cb: aiomax.Callback, page: int = 0):
+    async def show_stock_level1(cb: aiomax.Callback, page: int = 0):
         async for session in get_session():
-            # Получаем общее количество категорий
-            total_cats = (await session.execute(
-                select(func.count(Product.category.distinct())).where(Product.category != None)
+            total = (await session.execute(
+                select(func.count(Product.level1_category.distinct()))
+                .where(Product.level1_category != None)
             )).scalar()
-            # Получаем категории для текущей страницы
             categories = (await session.execute(
-                select(Product.category).where(Product.category != None)
+                select(Product.level1_category)
+                .where(Product.level1_category != None)
+                .distinct()
+                .order_by(Product.level1_category)
+                .offset(page * CATEGORIES_PER_PAGE).limit(CATEGORIES_PER_PAGE)
+            )).scalars().all()
+
+        kb = KeyboardBuilder()
+        if not categories:
+            kb.row(CallbackButton("🔍 Поиск по артикулу", "admin:stock_search_article", intent='default'))
+            kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
+            await cb.answer(text="📭 Нет категорий первого уровня.", keyboard=kb, format="markdown")
+            return
+
+        total_pages = (total - 1) // CATEGORIES_PER_PAGE + 1
+        header = f"**Категории** (стр. {page + 1}/{total_pages})"
+        for cat in categories:
+            kb.add(CallbackButton(cat, f"admin:stock_level2:{cat}", intent='default'))
+            kb.row()
+
+        nav = []
+        if page > 0:
+            nav.append(CallbackButton("← Назад", f"admin:stock_level1_page:{page - 1}", intent='default'))
+        if page < total_pages - 1:
+            nav.append(CallbackButton("Вперёд →", f"admin:stock_level1_page:{page + 1}", intent='default'))
+        if nav:
+            kb.row(*nav)
+
+        kb.row(CallbackButton("🔍 Поиск по артикулу", "admin:stock_search_article", intent='default'))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
+
+        await cb.answer(text=header, keyboard=kb, format="markdown")
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_level1_page:"))
+    async def stock_level1_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        page = int(cb.payload.split(":")[-1])
+        await show_stock_level1(cb, page)
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_level2:"))
+    async def stock_level2_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        level1 = cb.payload.split(":", 2)[2]
+        await show_stock_level2(cb, level1, page=0)
+
+    async def show_stock_level2(cb: aiomax.Callback, level1: str, page: int = 0):
+        async for session in get_session():
+            total = (await session.execute(
+                select(func.count(Product.category.distinct()))
+                .where(Product.level1_category == level1, Product.category != None)
+            )).scalar()
+            categories = (await session.execute(
+                select(Product.category)
+                .where(Product.level1_category == level1, Product.category != None)
                 .distinct()
                 .order_by(Product.category)
                 .offset(page * CATEGORIES_PER_PAGE).limit(CATEGORIES_PER_PAGE)
@@ -332,42 +440,47 @@ def register(bot: aiomax.Bot) -> None:
 
         kb = KeyboardBuilder()
         if not categories:
-            kb.add(CallbackButton("⚙️ Админ-меню", "admin:menu"))
-            await cb.answer(text="📭 Нет товаров.", keyboard=kb, format="markdown")
+            kb.add(CallbackButton("↩️ К категориям", "admin:set_stock_list", intent='default'))
+            kb.add(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
+            await cb.answer(text=f"В категории «{level1}» нет подкатегорий.", keyboard=kb, format="markdown")
             return
 
-        total_pages = (total_cats - 1) // CATEGORIES_PER_PAGE + 1
-        header = f"**Категории** (стр. {page + 1}/{total_pages})"
+        total_pages = (total - 1) // CATEGORIES_PER_PAGE + 1
+        header = f"**{level1}** — подкатегории (стр. {page + 1}/{total_pages})"
         for cat in categories:
-            kb.add(CallbackButton(cat, f"admin:stock_category:{cat}"))
+            kb.add(CallbackButton(cat, f"admin:stock_category:{level1}:{cat}", intent='default'))
             kb.row()
 
-        # Навигационные кнопки для категорий
         nav = []
         if page > 0:
-            nav.append(CallbackButton("← Назад", f"admin:stock_catlist_page:{page - 1}"))
+            nav.append(CallbackButton("← Назад", f"admin:stock_level2_page:{level1}:{page - 1}", intent='default'))
         if page < total_pages - 1:
-            nav.append(CallbackButton("Вперёд →", f"admin:stock_catlist_page:{page + 1}"))
+            nav.append(CallbackButton("Вперёд →", f"admin:stock_level2_page:{level1}:{page + 1}", intent='default'))
         if nav:
             kb.row(*nav)
-        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        kb.row(CallbackButton("↩️ К категориям", "admin:set_stock_list", intent='default'))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
         await cb.answer(text=header, keyboard=kb, format="markdown")
 
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_catlist_page:"))
-    async def stock_catlist_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_level2_page:"))
+    async def stock_level2_page_nav(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
-        page = int(cb.payload.split(":")[-1])
-        await show_stock_categories(cb, page)
+        parts = cb.payload.split(":")
+        level1 = parts[2]
+        page = int(parts[3])
+        await show_stock_level2(cb, level1, page)
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_category:"))
     async def stock_category_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:
             await cb.answer(notification="❌ Нет доступа.")
             return
-        category = cb.payload.split(":", 2)[2]
-        await show_stock_products_page(cb, category, 0)
+        parts = cb.payload.split(":")
+        level1 = parts[2]
+        category = parts[3]
+        await show_stock_products_page(cb, level1, category, 0)
 
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:stock_catpage:"))
     async def stock_catpage(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -375,31 +488,38 @@ def register(bot: aiomax.Bot) -> None:
             await cb.answer(notification="❌ Нет доступа.")
             return
         parts = cb.payload.split(":")
-        category = parts[2]
-        page = int(parts[3])
-        await show_stock_products_page(cb, category, page)
+        level1 = parts[2]
+        category = parts[3]
+        page = int(parts[4])
+        await show_stock_products_page(cb, level1, category, page)
 
-    async def show_stock_products_page(cb: aiomax.Callback, category: str, page: int):
+    async def show_stock_products_page(cb: aiomax.Callback, level1: str, category: str, page: int):
         async for session in get_session():
             total = (await session.execute(
-                select(func.count(Product.id)).where(Product.category == category)
+                select(func.count(Product.id)).where(
+                    Product.level1_category == level1,
+                    Product.category == category
+                )
             )).scalar()
             products = (await session.execute(
-                select(Product).where(Product.category == category)
+                select(Product).where(
+                    Product.level1_category == level1,
+                    Product.category == category
+                )
                 .order_by(Product.id)
                 .offset(page * ITEMS_PER_PAGE).limit(ITEMS_PER_PAGE)
             )).scalars().all()
 
         if not products:
             await cb.answer(
-                text=f"В категории «{category}» нет товаров.",
+                text=f"В подкатегории «{category}» нет товаров.",
                 keyboard=kb_back_to_menu(),
                 format="markdown"
             )
             return
 
         total_pages = (total - 1) // ITEMS_PER_PAGE + 1
-        lines = [f"**Остатки: {category}** (стр. {page+1}/{total_pages})\n"]
+        lines = [f"**Остатки: {category}** (стр. {page + 1}/{total_pages})\n"]
         kb = KeyboardBuilder()
 
         for p in products:
@@ -410,65 +530,22 @@ def register(bot: aiomax.Bot) -> None:
             else:
                 stock_str = "∞"
             lines.append(f"• {p.name} — на складе: {stock_str}")
-            kb.add(CallbackButton(f"✏️ {p.name[:25]}", f"admin:set_stock_select:{p.id}"))
+            kb.add(CallbackButton(f"✏️ {p.name[:25]}", f"admin:set_stock_select:{p.id}", intent='default'))
             kb.row()
 
         nav = []
         if page > 0:
-            nav.append(CallbackButton("← Назад", f"admin:stock_catpage:{category}:{page-1}"))
+            nav.append(
+                CallbackButton("← Назад", f"admin:stock_catpage:{level1}:{category}:{page - 1}", intent='default'))
         if page < total_pages - 1:
-            nav.append(CallbackButton("Вперёд →", f"admin:stock_catpage:{category}:{page+1}"))
+            nav.append(
+                CallbackButton("Вперёд →", f"admin:stock_catpage:{level1}:{category}:{page + 1}", intent='default'))
         if nav:
             kb.row(*nav)
-        kb.row(CallbackButton("↩️ К категориям", "admin:set_stock_list"))
-        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        kb.row(CallbackButton("↩️ К подкатегориям", f"admin:stock_level2:{level1}", intent='default'))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
 
-        await cb.answer(
-            text="\n".join(lines),
-            keyboard=kb,
-            format="markdown"
-        )
-
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:set_stock_select:"))
-    async def set_stock_select(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        if cb.user.user_id != ADMIN_USER_ID:
-            await cb.answer(notification="❌ Нет доступа.")
-            return
-        product_id = int(cb.payload.split(":")[-1])
-        cursor.change_state("admin_set_stock")
-        cursor.change_data({"product_id": product_id})
-        await cb.answer(notification=" ")
-        await cb.send("✏️ Введите новое количество (целое число) или 0, чтобы скрыть товар:", keyboard=kb_back_to_menu())
-
-    @bot.on_message(filters.state("admin_set_stock"))
-    async def handle_set_stock(message: aiomax.Message, cursor: fsm.FSMCursor):
-        if message.sender.user_id != ADMIN_USER_ID:
-            return
-        data = cursor.get_data() or {}
-        product_id = data.get("product_id")
-        try:
-            new_stock = int(message.body.text.strip())
-            if new_stock < 0:
-                raise ValueError
-        except ValueError:
-            await message.reply("❌ Введите целое неотрицательное число.", keyboard=kb_back_to_menu())
-            return
-
-        async for session in get_session():
-            product = await session.get(Product, product_id)
-            if not product:
-                await message.reply("❌ Товар не найден.", keyboard=kb_admin_menu())
-                cursor.clear()
-                return
-            product.stock = new_stock
-            product.is_active = new_stock > 0
-            product.in_stock = new_stock > 0
-            await session.commit()
-            await message.reply(
-                f"✅ Остаток товара «{product.name}» обновлён: {new_stock}",
-                keyboard=kb_admin_menu()
-            )
-        cursor.clear()
+        await cb.answer(text="\n".join(lines), keyboard=kb, format="markdown")
 
     # ------------------- Управление QR-кодом оплаты -----------------------
     @bot.on_button_callback("admin:payment_qr")
@@ -477,10 +554,10 @@ def register(bot: aiomax.Bot) -> None:
             await cb.answer(notification="❌ Нет доступа.")
             return
         kb = KeyboardBuilder()
-        kb.add(CallbackButton("🖼 Загрузить QR-код", "admin:upload_qr"))
-        kb.row(CallbackButton("👀 Показать текущий", "admin:show_qr"))
-        kb.row(CallbackButton("🗑 Удалить QR-код", "admin:delete_qr"))
-        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        kb.add(CallbackButton("🖼 Загрузить QR-код", "admin:upload_qr", intent='default'))
+        kb.row(CallbackButton("👀 Показать текущий", "admin:show_qr", intent='default'))
+        kb.row(CallbackButton("🗑 Удалить QR-код", "admin:delete_qr", intent='default'))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
         await cb.answer(
             text="**Управление QR-кодом для оплаты**",
             keyboard=kb,
@@ -542,3 +619,45 @@ def register(bot: aiomax.Bot) -> None:
         async for session in get_session():
             await set_bot_setting(session, "payment_qr_token", "")
         await cb.answer(notification="QR-код удалён.")
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:set_stock_select:"))
+    async def set_stock_select(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        product_id = int(cb.payload.split(":")[-1])
+        cursor.change_state("admin_set_stock")
+        cursor.change_data({"product_id": product_id})
+        await cb.answer(notification=" ")
+        await cb.send("✏️ Введите новое количество (целое число) или 0, чтобы скрыть товар:",
+                      keyboard=kb_back_to_menu())
+
+    @bot.on_message(filters.state("admin_set_stock"))
+    async def handle_set_stock(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        data = cursor.get_data() or {}
+        product_id = data.get("product_id")
+        try:
+            new_stock = int(message.body.text.strip())
+            if new_stock < 0:
+                raise ValueError
+        except ValueError:
+            await message.reply("❌ Введите целое неотрицательное число.", keyboard=kb_back_to_menu())
+            return
+
+        async for session in get_session():
+            product = await session.get(Product, product_id)
+            if not product:
+                await message.reply("❌ Товар не найден.", keyboard=kb_admin_menu())
+                cursor.clear()
+                return
+            product.stock = new_stock
+            product.is_active = new_stock > 0
+            product.in_stock = new_stock > 0
+            await session.commit()
+            await message.reply(
+                f"✅ Остаток товара «{product.name}» обновлён: {new_stock}",
+                keyboard=kb_admin_menu()
+            )
+        cursor.clear()

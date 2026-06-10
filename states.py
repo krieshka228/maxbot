@@ -23,6 +23,7 @@ class UserStates:
     CONTACT_ADMIN = "contact_admin"
     EDITING_PHONE = "editing_phone"
     EDITING_DELIVERY = "editing_delivery"
+    SEARCH_NAME = "search_name"
     EDITING_ADDRESS = "editing_address"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
 

@@ -10,7 +10,9 @@ from aiomax import fsm
 from utils import parse_quantity, format_cart
 from config import ADMIN_USER_ID
 from db import get_session, get_or_create_user, get_or_create_draft, add_item_to_order, get_bot_setting
-from keyboards import kb_consent, kb_main_menu, kb_cart_actions, kb_back_to_menu
+from keyboards import kb_consent, kb_main_menu, kb_cart_actions, kb_back_to_menu, kb_unavailable
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ async def _direct_order(message: aiomax.Message, cursor: fsm.FSMCursor, bot: aio
         order = (await session.execute(stmt)).scalar_one()  # обновляем
 
         cart_text = format_cart(order)
+        await delete_catalog_messages()
         await message.reply(
             f"✅ **{product.name}** × {qty} шт. добавлен в корзину!\n\n{cart_text}",
             format="markdown",
@@ -160,12 +163,31 @@ def register(bot: aiomax.Bot) -> None:
                 "персональных данных.",
                 keyboard=kb_consent(),
             )
-        else:
+            return
+
+        # Администратор всегда получает полное меню
+        if user_id == ADMIN_USER_ID:
             cursor.clear()
             await ctx.reply(
                 "✅ Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
+                keyboard=kb_main_menu(is_admin=True, has_qr=True),
             )
+            return
+
+        # Клиент без QR – сообщение о недоступности
+        if not has_qr:
+            cursor.clear()
+            await ctx.reply(
+                "⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+            )
+            return
+
+        cursor.clear()
+        await ctx.reply(
+            "✅ Главное меню:",
+            keyboard=kb_main_menu(is_admin=False, has_qr=True),
+        )
 
     # ── Согласие ─────────────────────────────────────────────────────────────
     @bot.on_button_callback("consent:yes")
@@ -189,24 +211,40 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback("menu:main")
     async def back_to_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
-        has_qr = await check_payment_qr()
-        cursor.clear()
-        await delete_catalog_messages(user_id, bot)
-        if cb.message and cb.message.body and cb.message.body.attachments:
-            try:
-                await cb.message.delete()
-            except Exception:
-                pass
-            await cb.send(
-                "🏠 Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
-            )
-        else:
+        is_admin = (user_id == ADMIN_USER_ID)
+
+        # Администратор всегда получает полное меню
+        logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
+        if is_admin:
+            cursor.clear()
+            await delete_catalog_messages(user_id, bot)
             await cb.answer(
                 text="🏠 Главное меню:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
+                keyboard=kb_main_menu(is_admin=True, has_qr=True),
+                attachments=[],
                 format="markdown"
             )
+            return
+
+        # Клиент: проверяем QR
+        if not await check_payment_qr():
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
+            return
+
+        # QR доступен, обычное меню
+        cursor.clear()
+        await delete_catalog_messages(user_id, bot)
+        await cb.answer(
+            text="🏠 Главное меню:",
+            keyboard=kb_main_menu(is_admin=False, has_qr=True),
+            attachments=[],
+            format="markdown"
+        )
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         await ctx.reply(f"Ваш user_id: {ctx.sender.user_id}")
+

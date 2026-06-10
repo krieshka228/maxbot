@@ -6,13 +6,31 @@ from aiomax.bot import Bot
 from config import BOT_TOKEN
 from db import init_db
 from reminders import reminder_loop
-from handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ------------------- Патч KeyboardBuilder.to_list – добавляет intent='default' во все кнопки при сериализации -------------------
+import aiomax.buttons as _buttons
+_original_kb_to_list = _buttons.KeyboardBuilder.to_list
+
+# --------------------------------------------------------------------------------------------------------------------------------
+
+# ------------------- Патч CallbackButton.from_json – добавляет intent='default', если его нет -------------------
+from aiomax.buttons import CallbackButton as _CB
+_original_cb_from_json = _CB.from_json
+
+@classmethod
+def patched_cb_from_json(cls, data: dict):
+    if "intent" not in data:
+        data = {**data, "intent": "default"}
+    return _original_cb_from_json(data)
+
+_CB.from_json = patched_cb_from_json
+# -----------------------------------------------------------------------------------------------------------------
 
 # ------------------- Патч методов Bot для авторизации через заголовок -------------------
 _original_get = Bot.get
@@ -30,6 +48,11 @@ async def patched_get(self, url, **kwargs):
     return await _original_get(self, url, **kwargs)
 
 async def patched_post(self, url, **kwargs):
+    # Логируем тело запроса, если это сообщение с текстом
+    if 'json' in kwargs and isinstance(kwargs['json'], dict):
+        import json
+        logger.info(f"Отправка JSON: {json.dumps(kwargs['json'], indent=2, ensure_ascii=False)}")
+
     params = kwargs.get("params", {})
     if isinstance(params, dict):
         params.pop("access_token", None)
@@ -53,10 +76,11 @@ Bot.get = patched_get
 Bot.post = patched_post
 Bot.put = patched_put
 
-# ------------------- Патч для сообщений канала (без sender) -------------------
+# ------------------- Патч handle_update: sender для канала -------------------
 _original_handle_update = Bot.handle_update
 
 async def patched_handle_update(self, update: dict):
+    # 1. Подставляем sender для сообщений канала (если его нет)
     if "message" in update and not update["message"].get("sender"):
         update["message"]["sender"] = {
             "user_id": 0,
@@ -71,6 +95,9 @@ async def patched_handle_update(self, update: dict):
 
 Bot.handle_update = patched_handle_update
 # ------------------------------------------------------------------------------
+
+# Импортируем обработчики ПОСЛЕ всех патчей, чтобы клавиатуры создавались с intent
+from handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
 
 async def main():
     logger.info("Инициализация базы данных...")

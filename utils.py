@@ -22,42 +22,61 @@ def parse_quantity(text: str) -> Optional[int]:
 
 
 def parse_post_product(text: str) -> tuple[
-    Optional[str], Optional[str], Optional[float], Optional[str], Optional[str], Optional[int]
+    Optional[str], Optional[str], Optional[float], Optional[str], Optional[str], Optional[str], Optional[int]
 ]:
     """
-    Разбирает текст поста. Возвращает (название, артикул, цена, категория, описание, stock).
-    Категория — часть названия до первой запятой.
+    Возвращает (название, артикул, цена, level1_category, category, description, stock).
     """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) < 3:   # достаточно трёх строк: название, артикул, цена
-        return None, None, None, None, None, None
+    if len(lines) < 3:
+        return None, None, None, None, None, None, None
 
     name = lines[0]
+    # Категория второго уровня – часть названия до первой запятой
     category = name.split(",")[0].strip() if "," in name else name.strip()
 
     article = None
-    stock = None
     price = None
+    level1_category = None
+    stock = None
 
-    for line in lines:
+    # Ищем артикул и цену
+    for idx, line in enumerate(lines):
         if line.lower().startswith("артикул"):
             parts = line.split(maxsplit=1)
             if len(parts) > 1:
                 article = parts[1].strip()
-        elif "на складе:" in line.lower():
-            try:
-                stock = int(re.search(r"\d+", line).group())
-            except:
-                pass
         elif line.lower().startswith("цена"):
             parts = line.split(maxsplit=1)
             if len(parts) > 1:
                 price_match = re.search(r"(\d+[\.,]?\d*)", parts[1])
                 if price_match:
                     price = float(price_match.group(1).replace(",", "."))
+            # Ищем level1_category: первая непустая строка после цены, не хештег
+            for i in range(idx + 1, len(lines)):
+                candidate = lines[i]
+                if candidate.startswith("#"):
+                    continue
+                level1_category = candidate
+                break
+        elif "на складе:" in line.lower():
+            try:
+                stock = int(re.search(r"\d+", line).group())
+            except:
+                pass
+
+    # Если level1_category не найдена, используем строку, следующую сразу за ценой (без учёта хештегов)
+    if level1_category is None:
+        for idx, line in enumerate(lines):
+            if line.lower().startswith("цена"):
+                for i in range(idx + 1, len(lines)):
+                    if not lines[i].startswith("#"):
+                        level1_category = lines[i]
+                        break
+                break
 
     description = text.strip()
-    return name, article, price, category, description, stock
+    return name, article, price, level1_category, category, description, stock
 
 
 def format_cart(order) -> str:

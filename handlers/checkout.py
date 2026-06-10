@@ -9,10 +9,11 @@ from aiomax import fsm
 
 from config import ADMIN_CHAT_ID, ADMIN_USER_ID, PAYMENT_DETAILS
 from db import get_session, get_draft_order, get_order_with_items, OrderStatus, get_bot_setting
-from keyboards import kb_payment, kb_admin_confirm_payment, kb_back_to_menu
+from keyboards import kb_payment, kb_admin_confirm_payment, kb_back_to_menu, kb_unavailable
 from utils import format_cart, format_order_for_admin
 from states import UserStates
 from utils import check_payment_qr
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,11 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("payment:receipt:"))
     async def payment_receipt_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
             return
         order_id = int(cb.payload.split(":")[-1])
         cursor.change_state(UserStates.AWAITING_RECEIPT)
@@ -68,25 +73,46 @@ def register(bot: aiomax.Bot) -> None:
     @bot.on_button_callback(lambda cb: cb.payload.startswith("payment:cancel:"))
     async def payment_cancel(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
             return
+
         order_id = int(cb.payload.split(":")[-1])
         await cb.answer(notification=" ")
+
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
-            if order and order.user_id == cb.user.user_id:
-                order.status = OrderStatus.cancelled
-                # Возвращаем остатки на склад
-                for item in order.items:
-                    if item.product and item.product.stock is not None:
-                        item.product.stock += item.quantity
-                await session.commit()
-                await cb.send(
-                    f"❌ Заказ #{order_id} отменён.",
-                    keyboard=kb_back_to_menu(),
-                )
-            else:
+            if not order or order.user_id != cb.user.user_id:
                 await cb.send("❌ Заказ не найден.")
+                return
+
+            # 1. Атомарно меняем статус на cancelled, если он ещё не cancelled
+            result = await session.execute(
+                text("UPDATE orders SET status = :new_status WHERE id = :id AND status != :new_status"),
+                {"new_status": OrderStatus.cancelled, "id": order_id}
+            )
+            if result.rowcount == 0:
+                # Уже отменён
+                await cb.send("❌ Этот заказ уже отменён.")
+                return
+
+            # 2. Возвращаем остатки
+            for item in order.items:
+                if item.product and item.product.stock is not None:
+                    await session.execute(
+                        text("UPDATE products SET stock = stock + :qty WHERE id = :id"),
+                        {"qty": item.quantity, "id": item.product.id}
+                    )
+
+            await session.commit()
+
+        await cb.send(
+            f"❌ Заказ #{order_id} отменён.",
+            keyboard=kb_back_to_menu(),
+        )
 
     # ── Администратор: подтверждение оплаты ──────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:pay_ok:"))
@@ -99,7 +125,7 @@ def register(bot: aiomax.Bot) -> None:
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order:
-                await cb.send("❌ Заказ не найден.")
+                await cb.answer("❌ Заказ не найден.",keyboard=kb_back_to_menu())
                 return
             order.status = OrderStatus.confirmed
             await session.commit()
@@ -123,7 +149,7 @@ def register(bot: aiomax.Bot) -> None:
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order:
-                await cb.send("❌ Заказ не найден.")
+                await cb.answer("❌ Заказ не найден.",keyboard=kb_back_to_menu())
                 return
             order.status = OrderStatus.pending
             await session.commit()
