@@ -10,7 +10,7 @@ from aiomax import fsm
 from utils import parse_quantity, format_cart
 from config import ADMIN_USER_ID
 from db import get_session, get_or_create_user, get_or_create_draft, add_item_to_order, get_bot_setting
-from keyboards import kb_consent, kb_main_menu, kb_cart_actions, kb_back_to_menu, kb_unavailable
+from keyboards import kb_main_menu, kb_cart_actions, kb_back_to_menu, kb_unavailable
 
 
 
@@ -51,9 +51,6 @@ async def _direct_order(message: aiomax.Message, cursor: fsm.FSMCursor, bot: aio
 
     async for session in get_session():
         user = await get_or_create_user(session, user_id)
-        if not user.consented:
-            await message.reply("❌ Сначала нужно дать согласие на обработку данных. Нажмите /start")
-            return
 
         from sqlalchemy import select
         from db import Product
@@ -119,32 +116,6 @@ def register(bot: aiomax.Bot) -> None:
         await _direct_order(message, cursor, bot)
 
     # ── Кнопка "Начать" в ЛС ────────────────────────────────────────────────
-    @bot.on_bot_start()
-    async def on_bot_start(payload: aiomax.BotStartPayload, cursor: fsm.FSMCursor):
-        user_id = payload.user.user_id
-        has_qr = await check_payment_qr()
-        async for session in get_session():
-            user = await get_or_create_user(
-                session, user_id,
-                full_name=payload.user.name,
-                username=getattr(payload.user, "username", None),
-            )
-        if not user.consented:
-            cursor.change_state("consent")
-            await payload.send(
-                "👋 Привет! Для работы с ботом нам нужно ваше согласие на обработку "
-                "персональных данных (имя, телефон, адрес доставки).\n\n"
-                "Данные используются исключительно для оформления и доставки заказов.",
-                keyboard=kb_consent(),
-            )
-        else:
-            cursor.clear()
-            await payload.send(
-                "👋 С возвращением! Выберите действие:",
-                keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
-            )
-
-    # ── Команда /start ───────────────────────────────────────────────────────
     @bot.on_command("start")
     async def cmd_start(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         logger.info("Обработчик /start вызван")
@@ -156,15 +127,6 @@ def register(bot: aiomax.Bot) -> None:
                 full_name=ctx.sender.name,
                 username=getattr(ctx.sender, "username", None),
             )
-        if not user.consented:
-            cursor.change_state("consent")
-            await ctx.reply(
-                "👋 Привет! Для продолжения нужно ваше согласие на обработку "
-                "персональных данных.",
-                keyboard=kb_consent(),
-            )
-            return
-
         # Администратор всегда получает полное меню
         if user_id == ADMIN_USER_ID:
             cursor.clear()
@@ -174,7 +136,6 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # Клиент без QR – сообщение о недоступности
         if not has_qr:
             cursor.clear()
             await ctx.reply(
@@ -189,21 +150,36 @@ def register(bot: aiomax.Bot) -> None:
             keyboard=kb_main_menu(is_admin=False, has_qr=True),
         )
 
-    # ── Согласие ─────────────────────────────────────────────────────────────
-    @bot.on_button_callback("consent:yes")
-    async def consent_yes(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        user_id = cb.user.user_id
+    @bot.on_bot_start()
+    async def on_bot_start(payload: aiomax.BotStartPayload, cursor: fsm.FSMCursor):
+        user_id = payload.user.user_id
         has_qr = await check_payment_qr()
         async for session in get_session():
-            user = await get_or_create_user(session, user_id)
-            user.consented = True
-            user.consented_at = datetime.utcnow()
-            await session.commit()
+            user = await get_or_create_user(
+                session, user_id,
+                full_name=payload.user.name,
+                username=getattr(payload.user, "username", None),
+            )
+        if user_id == ADMIN_USER_ID:
+            cursor.clear()
+            await payload.send(
+                "👋 С возвращением! Выберите действие:",
+                keyboard=kb_main_menu(is_admin=True, has_qr=True),
+            )
+            return
+
+        if not has_qr:
+            cursor.clear()
+            await payload.send(
+                "⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+            )
+            return
+
         cursor.clear()
-        await cb.answer(
-            text="✅ Спасибо! Теперь вы можете делать заказы.",
-            keyboard=kb_main_menu(is_admin=(user_id == ADMIN_USER_ID), has_qr=has_qr),
-            format="markdown"
+        await payload.send(
+            "👋 С возвращением! Выберите действие:",
+            keyboard=kb_main_menu(is_admin=False, has_qr=True),
         )
 
     # ── Главное меню (кнопка «Назад») ────────────────────────────────────────

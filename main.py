@@ -13,11 +13,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------- Патч KeyboardBuilder.to_list – добавляет intent='default' во все кнопки при сериализации -------------------
+# ------------------- Патч CallbackButton.__init__ – автоматически добавляет intent='default' -------------------
 import aiomax.buttons as _buttons
-_original_kb_to_list = _buttons.KeyboardBuilder.to_list
+_original_cb_init = _buttons.CallbackButton.__init__
 
-# --------------------------------------------------------------------------------------------------------------------------------
+def _patched_cb_init(self, text, payload, intent='default'):
+    _original_cb_init(self, text, payload, intent)
+
+_buttons.CallbackButton.__init__ = _patched_cb_init
+# -----------------------------------------------------------------------------------------------------------------
 
 # ------------------- Патч CallbackButton.from_json – добавляет intent='default', если его нет -------------------
 from aiomax.buttons import CallbackButton as _CB
@@ -48,11 +52,6 @@ async def patched_get(self, url, **kwargs):
     return await _original_get(self, url, **kwargs)
 
 async def patched_post(self, url, **kwargs):
-    # Логируем тело запроса, если это сообщение с текстом
-    if 'json' in kwargs and isinstance(kwargs['json'], dict):
-        import json
-        logger.info(f"Отправка JSON: {json.dumps(kwargs['json'], indent=2, ensure_ascii=False)}")
-
     params = kwargs.get("params", {})
     if isinstance(params, dict):
         params.pop("access_token", None)
@@ -80,7 +79,6 @@ Bot.put = patched_put
 _original_handle_update = Bot.handle_update
 
 async def patched_handle_update(self, update: dict):
-    # 1. Подставляем sender для сообщений канала (если его нет)
     if "message" in update and not update["message"].get("sender"):
         update["message"]["sender"] = {
             "user_id": 0,
@@ -105,7 +103,6 @@ async def main():
 
     bot = aiomax.Bot(BOT_TOKEN, default_format="markdown")
 
-    # Регистрируем обработчики
     start.register(bot)
     cart.register(bot)
     checkout.register(bot)
@@ -115,7 +112,6 @@ async def main():
     posts.register(bot)
     catalog.register(bot)
 
-    # Фоновая задача напоминаний
     asyncio.create_task(reminder_loop(bot))
     logger.info("Фоновая задача напоминаний запущена.")
 

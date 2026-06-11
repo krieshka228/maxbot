@@ -334,18 +334,6 @@ def register(bot: aiomax.Bot) -> None:
                 full_name=message.sender.name,
                 username=getattr(message.sender, 'username', None)
             )
-            if not user.consented:
-                if card_msg_id:
-                    await bot.edit_message(
-                        message_id=card_msg_id,
-                        text="❌ Сначала дайте согласие: /start",
-                        keyboard=kb_back_to_menu()
-                    )
-                else:
-                    await message.reply("❌ Сначала дайте согласие: /start", keyboard=kb_back_to_menu())
-                cursor.clear()
-                return
-
             product = await session.get(Product, product_id)
             if not product or not product.is_active:
                 if card_msg_id:
