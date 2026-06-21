@@ -1,12 +1,12 @@
 import asyncio
 import logging
+
 import aiomax
 from aiomax.bot import Bot
-
-from config import BOT_TOKEN
-from db import init_db, engine
-from reminders import reminder_loop
-from channel_publisher import auto_publish_loop
+from maxbot.config import BOT_TOKEN
+from maxbot.db import init_db, engine
+from maxbot.reminders import reminder_loop
+from maxbot.channel_publisher import auto_publish_loop
 
 # ── Настройка логирования ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -94,12 +94,12 @@ async def patched_handle_update(self, update: dict):
 Bot.handle_update = patched_handle_update
 
 # ── Импортируем обработчики ПОСЛЕ всех патчей ──────────────────────────────
-from handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
-from middlewares import patch_bot_antiflood
+from maxbot.handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
+from maxbot.middlewares import patch_bot_antiflood
 
 
 async def main():
-    from config import settings
+    from maxbot.config import settings
     settings.assert_production_ready()
 
     logger.info("Инициализация базы данных...")

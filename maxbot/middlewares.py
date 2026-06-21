@@ -10,7 +10,7 @@ import time
 from collections import defaultdict, deque
 from typing import Deque
 
-from config import ADMIN_USER_ID, settings
+from maxbot.config import ADMIN_USER_ID, settings
 
 logger = logging.getLogger(__name__)
 

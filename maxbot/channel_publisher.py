@@ -15,9 +15,9 @@ import logging
 
 import aiomax
 
-from config import CHANNEL_ID
-from db import get_session, get_products_without_max_post, mark_product_published,get_bot_setting, Product
-from utils import build_post_text, get_max_attachments
+from maxbot.config import CHANNEL_ID
+from maxbot.db import get_session, get_products_without_max_post, mark_product_published,get_bot_setting, Product
+from maxbot.utils import build_post_text, get_max_attachments
 from sqlalchemy import select
 logger = logging.getLogger(__name__)
 

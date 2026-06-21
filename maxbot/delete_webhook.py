@@ -1,6 +1,6 @@
 import asyncio
 import aiohttp
-from config import BOT_TOKEN
+from maxbot.config import BOT_TOKEN
 
 async def delete_webhook():
     url = "https://platform-api.max.ru/subscriptions"

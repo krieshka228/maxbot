@@ -8,7 +8,7 @@ from datetime import datetime
 
 import aiomax
 
-from db import get_session, get_unpaid_orders_for_reminder
+from maxbot.db import get_session, get_unpaid_orders_for_reminder
 
 logger = logging.getLogger(__name__)
 

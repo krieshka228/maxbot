@@ -16,8 +16,8 @@ Max-бот НЕ синхронизирует товары из канала Tele
 import enum
 from datetime import datetime, timedelta
 
-from config import DATABASE_URL, settings
-from cache import get_or_set as _cache_get_or_set, invalidate_catalog_cache
+from maxbot.config import DATABASE_URL, settings
+from maxbot.cache import get_or_set as _cache_get_or_set, invalidate_catalog_cache
 import logging
 from sqlalchemy import (
     BigInteger, Boolean, DateTime, Enum, Float,

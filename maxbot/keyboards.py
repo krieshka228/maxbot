@@ -5,7 +5,7 @@ keyboards.py — Клавиатуры для бота (aiomax KeyboardBuilder + 
 import aiomax
 from aiomax import buttons
 from aiomax.buttons import KeyboardBuilder, CallbackButton
-from config import ADMIN_USER_ID
+from maxbot.config import ADMIN_USER_ID
 
 
 def kb_consent() -> aiomax.buttons.KeyboardBuilder:
