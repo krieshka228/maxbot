@@ -1,0 +1,10 @@
+.env
+key.json
+*.db
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.git/
+*.zip
+tests/
