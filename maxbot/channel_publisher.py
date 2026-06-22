@@ -69,6 +69,7 @@ async def auto_publish_loop(bot: aiomax.Bot):
     logger.info("Задача автопубликации в канал Max запущена.")
     while True:
         try:
+            # Проверяем глобальный флаг автопубликации
             async for session in get_session():
                 enabled = await get_bot_setting(session, "auto_publish_enabled")
                 break
@@ -77,6 +78,7 @@ async def auto_publish_loop(bot: aiomax.Bot):
                 await asyncio.sleep(10)
                 continue
 
+            # Получаем список товаров для публикации
             async for session in get_session():
                 products = (await session.execute(
                     select(Product).where(
@@ -91,34 +93,23 @@ async def auto_publish_loop(bot: aiomax.Bot):
                 logger.info(f"Найдено {len(products)} товаров для автопубликации")
 
                 for product in products:
-                    # Повторная проверка флага перед каждой публикацией
+                    # Перед каждой публикацией проверяем флаг
                     enabled_now = await get_bot_setting(session, "auto_publish_enabled")
                     if enabled_now != "true":
                         logger.info("Автопубликация выключена пользователем")
                         break
 
+                    # Пауза 60 секунд перед каждым постом
+                    logger.info("Пауза 60 секунд перед публикацией следующего товара")
+                    await asyncio.sleep(60)
+
                     post_id = await publish_product_to_max(bot, product, CHANNEL_ID)
                     if post_id:
                         await mark_product_published(session, product, str(post_id))
                         logger.info(f"Товар #{product.id} опубликован (post {post_id})")
-
-                        # Проверяем, остались ли ещё товары
-                        remaining = (await session.execute(
-                            select(Product).where(
-                                Product.is_active == True,
-                                Product.max_post_id == None
-                            )
-                        )).scalars().all()
-
-                        if remaining:
-                            logger.info(f"Осталось {len(remaining)} товаров, пауза 60 секунд")
-                            await asyncio.sleep(60)
-                        # Если товаров нет – выходим из цикла по товарам
-                        if not remaining:
-                            break
                     else:
                         logger.warning(f"Товар #{product.id} не опубликован")
-                        await asyncio.sleep(3)
+
         except Exception as e:
             logger.error(f"Ошибка в автопубликации: {e}", exc_info=True)
             await asyncio.sleep(10)

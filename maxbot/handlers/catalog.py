@@ -1,5 +1,5 @@
 """
-handlers/catalog.py — Каталог для покупателей: категории, товары с фото/видео, поиск, заказ.
+handlers/catalog.py — Каталог для покупателей: категории, товары с фото, поиск, заказ.
 Показываются только активные товары (is_active == True).
 Реализовано атомарное резервирование только при оформлении заказа.
 """
@@ -29,6 +29,7 @@ ITEMS_PER_PAGE = 3
 
 _catalog_messages: dict[int, list[str]] = {}   # карточки товаров
 _nav_messages: dict[int, str] = {}             # ID навигационного сообщения
+_category_messages: dict[int, str] = {}         # ID сообщения со списком подкатегорий
 
 
 async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, also_delete_message_id: str | None = None):
@@ -65,6 +66,8 @@ def register(bot: aiomax.Bot) -> None:
         await show_level1_categories(cb)
 
     async def show_level1_categories(cb: aiomax.Callback):
+        user_id = cb.user.user_id
+
         async for session in get_session():
             categories = await get_active_categories(session)
             break
@@ -73,16 +76,29 @@ def register(bot: aiomax.Bot) -> None:
         if not categories:
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
             await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
+            _category_messages[user_id] = cb.message.id
             return
 
         for cat in categories:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
+
         await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
+
+        # Удаляем старое сообщение категорий, если оно не совпадает с текущим
+        prev_msg_id = _category_messages.pop(user_id, None)
+        if prev_msg_id is not None and prev_msg_id != cb.message.id:
+            try:
+                await bot.delete_message(prev_msg_id)
+            except Exception:
+                pass
+
+        _category_messages[user_id] = cb.message.id
 
     # ------------------- Уровень 2: Подкатегории -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:level1:"))
     async def catalog_level2_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        await cb.answer(notification=" ")
         user_id = cb.user.user_id
         if user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
@@ -96,6 +112,8 @@ def register(bot: aiomax.Bot) -> None:
         await show_level2_categories(cb, category)
 
     async def show_level2_categories(cb: aiomax.Callback, category: str):
+        user_id = cb.user.user_id
+
         async for session in get_session():
             products = await get_active_products_in_category(session, category)
             break
@@ -113,17 +131,32 @@ def register(bot: aiomax.Bot) -> None:
             kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
             await cb.answer(text=f"В категории «{category}» пока нет подкатегорий.", keyboard=kb)
+            _category_messages[user_id] = cb.message.id
             return
 
         for sub in sorted(subcategories):
             kb.row(CallbackButton(f"{sub} ({subcategories[sub]})", f"catalog:category:{category}:{sub}"))
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
+
+        # Сначала отвечаем на callback, редактируя сообщение
         await cb.answer(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
+
+        # После этого удаляем старое сообщение категорий (если оно не то же самое)
+        prev_msg_id = _category_messages.pop(user_id, None)
+        if prev_msg_id is not None and prev_msg_id != cb.message.id:
+            try:
+                await bot.delete_message(prev_msg_id)
+            except Exception:
+                pass
+
+        # Сохраняем ID текущего сообщения
+        _category_messages[user_id] = cb.message.id
 
     # ------------------- Уровень 3: Товары (с пагинацией) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
     async def catalog_category_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        await cb.answer(notification=" ")
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
                 text="⚠️ Бот временно недоступен. Приносим извинения.",
@@ -155,30 +188,33 @@ def register(bot: aiomax.Bot) -> None:
         await delete_catalog_messages(user_id, bot)
         await show_category_page(bot, cb, category, subcategory, page)
 
-    async def show_category_page(bot: aiomax.Bot, cb: aiomax.Callback, category: str, subcategory: str, page: int):
-        user_id = cb.user.user_id
+    async def show_category_page(bot, ctx, category: str, subcategory: str, page: int):
+        user_id = ctx.user.user_id
 
-        # Удаляем текущее сообщение (список подкатегорий), чтобы оно не висело
-        try:
-            await cb.message.delete()
-        except Exception:
-            pass
-
-        # Удаляем старые карточки и навигацию (если были)
-        await delete_catalog_messages(user_id, bot)
+        prev_msg_id = _category_messages.pop(user_id, None)
+        if prev_msg_id is not None:
+            try:
+                await bot.delete_message(prev_msg_id)
+            except Exception:
+                pass
 
         async for session in get_session():
             cat_products = await get_active_products_in_category(session, category)
             matched = [
                 p for p in cat_products
-                if p.name == subcategory or p.name.startswith(subcategory + ",")
+                if p.name == subcategory
+                   or p.name.startswith(subcategory + ",")
+                   or p.name.startswith(subcategory + " ,")
             ]
 
             if not matched:
                 kb = KeyboardBuilder()
                 kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:level1:{category}"))
                 kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-                await cb.send(text=f"В подкатегории «{subcategory}» пока нет товаров.", keyboard=kb)
+                await ctx.send(
+                    text=f"В подкатегории «{subcategory}» пока нет товаров.",
+                    keyboard=kb
+                )
                 return
 
             total = len(matched)
@@ -186,20 +222,45 @@ def register(bot: aiomax.Bot) -> None:
             page = max(0, min(page, total_pages - 1))
             products = matched[page * ITEMS_PER_PAGE: (page + 1) * ITEMS_PER_PAGE]
 
-            async def _send_card(product: Product):
+            new_msgs = []
+            for product in products:
                 text = build_catalog_card_text(product)
                 kb = KeyboardBuilder()
                 kb.row(CallbackButton("🛒 Заказать", f"order:start:{product.id}"))
-                attachments = await get_max_attachments(bot, session, product)
-                msg = await cb.send(
-                    text,
-                    keyboard=kb,
-                    format="markdown",
-                    attachments=attachments or None,
-                )
-                return msg.id
 
-            new_msgs = list(await asyncio.gather(*(_send_card(p) for p in products)))
+                attachments = await get_max_attachments(bot, session, product)
+
+                # Пробуем отправить всё одним сообщением (фото + видео)
+                try:
+                    msg = await bot.send_message(
+                        text=text,
+                        user_id=user_id,
+                        format="markdown",
+                        keyboard=kb,
+                        attachments=attachments if attachments else None,
+                    )
+                    new_msgs.append(msg.id)
+                except Exception:
+                    # Если не получилось — откатываемся: только фото, если есть
+                    photo_atts = [att for att in attachments if isinstance(att, aiomax.PhotoAttachment)]
+                    if photo_atts:
+                        msg = await bot.send_message(
+                            text=text,
+                            user_id=user_id,
+                            format="markdown",
+                            keyboard=kb,
+                            attachments=photo_atts,
+                        )
+                        new_msgs.append(msg.id)
+                    else:
+                        msg = await bot.send_message(
+                            text=text,
+                            user_id=user_id,
+                            format="markdown",
+                            keyboard=kb,
+                        )
+                        new_msgs.append(msg.id)
+
             _catalog_messages[user_id] = new_msgs
 
             nav_kb = KeyboardBuilder()
@@ -214,9 +275,14 @@ def register(bot: aiomax.Bot) -> None:
             nav_kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
             nav_text = f"{category} → **{subcategory}** (стр. {page + 1}/{total_pages}, товаров: {total})"
-            nav_msg = await cb.send(text=nav_text, keyboard=nav_kb, format="markdown")
+            nav_msg = await ctx.send(
+                text=nav_text,
+                format="markdown",
+                keyboard=nav_kb
+            )
             _nav_messages[user_id] = nav_msg.id
             break
+
     # ------------------- Заказ (без резервирования в корзине) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("order:start:"))
     async def start_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -247,6 +313,9 @@ def register(bot: aiomax.Bot) -> None:
 
         await delete_catalog_messages(user_id, bot)
 
+        # Только фото
+        photo_atts = [att for att in attachments if isinstance(att, aiomax.PhotoAttachment)]
+
         text = product.name
         if product.article:
             text += f"\nАртикул {product.article}"
@@ -255,12 +324,21 @@ def register(bot: aiomax.Bot) -> None:
         text += f"\n\nЦена {product.price:.0f}"
         text += "\n\n✏️ Введите количество:"
 
-        msg = await cb.send(
-            text=text,
-            keyboard=kb_back_to_menu(),
-            format="markdown",
-            attachments=attachments or None,
-        )
+        if not photo_atts:
+            msg = await bot.send_message(
+                text=text,
+                user_id=user_id,
+                keyboard=kb_back_to_menu(),
+                format="markdown",
+            )
+        else:
+            msg = await bot.send_message(
+                text=text,
+                user_id=user_id,
+                keyboard=kb_back_to_menu(),
+                format="markdown",
+                attachments=photo_atts,
+            )
 
         cursor.change_state("order_qty")
         cursor.change_data({"product_id": product_id, "card_msg_id": msg.id})
@@ -271,6 +349,7 @@ def register(bot: aiomax.Bot) -> None:
         data = cursor.get_data()
         product_id = data.get("product_id")
         card_msg_id = data.get("card_msg_id")
+        card_msg_ids = data.get("card_msg_ids", [card_msg_id] if card_msg_id else [])
         user_id = message.sender.user_id
 
         if not qty:
@@ -293,14 +372,12 @@ def register(bot: aiomax.Bot) -> None:
             )
             product = await session.get(Product, product_id)
             if not product or not product.is_active:
-                if card_msg_id:
-                    await bot.edit_message(
-                        message_id=card_msg_id,
-                        text="❌ Товар недоступен.",
-                        keyboard=kb_back_to_menu()
-                    )
-                else:
-                    await message.reply("❌ Товар недоступен.", keyboard=kb_back_to_menu())
+                for mid in card_msg_ids:
+                    try:
+                        await bot.delete_message(mid)
+                    except Exception:
+                        pass
+                await message.reply("❌ Товар недоступен.", keyboard=kb_back_to_menu())
                 cursor.clear()
                 return
 
@@ -322,8 +399,11 @@ def register(bot: aiomax.Bot) -> None:
                        + (f", у вас в корзине уже {existing_qty} шт." if existing_qty else ""))
                 if card_msg_id:
                     await bot.edit_message(message_id=card_msg_id, text=msg, keyboard=kb_back_to_menu())
-                else:
-                    await message.reply(msg, keyboard=kb_back_to_menu())
+                for mid in card_msg_ids[1:]:
+                    try:
+                        await bot.delete_message(mid)
+                    except Exception:
+                        pass
                 cursor.clear()
                 return
 
@@ -347,6 +427,11 @@ def register(bot: aiomax.Bot) -> None:
                 attachments=[],
                 format="markdown"
             )
+            for mid in card_msg_ids[1:]:
+                try:
+                    await bot.delete_message(mid)
+                except Exception:
+                    pass
         else:
             await message.reply(confirm_text, keyboard=kb, format="markdown")
 
@@ -396,18 +481,22 @@ def register(bot: aiomax.Bot) -> None:
                                 keyboard=kb_back_to_menu())
             return
 
-        text = build_catalog_card_text(product)
+        user_id = message.sender.user_id
+        photo_atts = [att for att in attachments if isinstance(att, aiomax.PhotoAttachment)]
 
+        text = build_catalog_card_text(product)
         kb = KeyboardBuilder()
         kb.row(CallbackButton("🛒 Заказать", f"order:start:{product.id}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        await message.reply(
-            text,
-            keyboard=kb,
-            format="markdown",
-            attachments=attachments if attachments else None
-        )
+        if not photo_atts:
+            await message.reply(text, keyboard=kb, format="markdown")
+        else:
+            await message.reply(
+                text, keyboard=kb, format="markdown",
+                attachments=photo_atts,
+            )
+
         cursor.clear()
 
     # ------------------- Поиск по названию -----------------------

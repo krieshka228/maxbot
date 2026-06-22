@@ -9,10 +9,19 @@ from maxbot.reminders import reminder_loop
 from maxbot.channel_publisher import auto_publish_loop
 
 # ── Настройка логирования ──────────────────────────────────────────────────
+# ── Настройка логирования ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+# Отключаем подробные DEBUG-логи библиотек (они слишком шумные)
+logging.getLogger("aiomax").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)   # если используется
+logging.getLogger("httpx").setLevel(logging.WARNING)       # если есть
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+# При необходимости можно убрать все логгеры из сторонних библиотек
+
 logger = logging.getLogger(__name__)
 
 # ── Патч CallbackButton.__init__ – автоматически добавляет intent='default' ──

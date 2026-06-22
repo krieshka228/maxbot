@@ -27,60 +27,6 @@ def _parse_post_link(text: str) -> int | None:
     return None
 
 
-async def _direct_order(message: aiomax.Message, cursor: fsm.FSMCursor, bot: aiomax.Bot):
-    """Добавляет товар в корзину по ссылке/артикулу и количеству."""
-    user_id = message.sender.user_id
-    text = message.body.text.strip() if message.body and message.body.text else ""
-    if not text:
-        return
-
-    parts = text.split(maxsplit=1)
-    post_id = None
-    qty = None
-    if len(parts) == 2:
-        post_id = _parse_post_link(parts[0])
-        qty = parse_quantity(parts[1])
-    if post_id is None or qty is None:
-        return
-
-    async for session in get_session():
-        # Исправлено: message.sender вместо cb.user
-        user = await get_or_create_user(
-            session, user_id,
-            full_name=message.sender.name,
-            username=getattr(message.sender, "username", None),
-            platform="MAX"
-        )
-
-        from sqlalchemy import select
-        from maxbot.db import Product
-        product = (await session.execute(
-            select(Product).where(Product.post_id == post_id, Product.is_active == True)
-        )).scalar_one_or_none()
-
-        if not product:
-            await message.reply("⚠️ Товар с таким артикулом/постом не найден.")
-            return
-
-        order = await get_or_create_draft(session, user_id)
-        from sqlalchemy.orm import selectinload
-        from maxbot.db import Order, OrderItem
-        stmt = select(Order).where(Order.id == order.id).options(
-            selectinload(Order.items).selectinload(OrderItem.product)
-        )
-        order = (await session.execute(stmt)).scalar_one()
-        await add_item_to_order(session, order, product, qty)
-        order = (await session.execute(stmt)).scalar_one()
-
-        cart_text = format_cart(order)
-        await delete_catalog_messages(user_id, bot)
-        await message.reply(
-            f"✅ **{product.name}** × {qty} шт. добавлен в корзину!\n\n{cart_text}",
-            format="markdown",
-            keyboard=kb_cart_actions(order.id)
-        )
-
-
 async def check_payment_qr() -> bool:
     async for session in get_session():
         token = await get_bot_setting(session, "payment_qr_token")
@@ -106,12 +52,6 @@ def register(bot: aiomax.Bot) -> None:
             lines.append(f"• {p.name} — post_id={p.post_id}")
         await ctx.reply("\n".join(lines), format="markdown")
 
-    @bot.on_message(lambda msg: not getattr(msg.recipient, "chat_type", None) == "channel")
-    async def direct_order_handler(message: aiomax.Message, cursor: fsm.FSMCursor):
-        current_state = bot.storage.get_state(message.sender.user_id)
-        if current_state is not None and current_state not in ("idle", None):
-            return
-        await _direct_order(message, cursor, bot)
 
     @bot.on_command("start")
     async def cmd_start(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):

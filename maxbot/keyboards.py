@@ -81,7 +81,6 @@ def kb_admin_menu(auto_publish_enabled: bool = False) -> KeyboardBuilder:
     kb.row(CallbackButton("💳 Реквизиты", "admin:payment_qr", intent='default'))
     kb.row(CallbackButton("📦 Изменить остаток", "admin:set_stock_list", intent='default'))
     kb.row(CallbackButton("🗑️ Удалить по артикулам", "admin:delete_by_articles", intent='default'))
-    kb.row(CallbackButton("📤 Опубликовать в канал Max", "admin:publish_to_channel", intent='default'))
     # Новая кнопка для перехода в подменю автопубликации
     kb.row(CallbackButton("📤 Автовыкладывание", "admin:auto_publish_menu", intent='default'))
     kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))

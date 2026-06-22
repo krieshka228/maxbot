@@ -124,15 +124,18 @@ def register(bot: aiomax.Bot) -> None:
     # ── Администратор: подтверждение оплаты ──────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:pay_ok:"))
     async def admin_pay_ok(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        logger.info(f"CALLBACK admin:pay_ok user_id={cb.user.user_id}")
+        # Сразу подтверждаем получение callback, чтобы избежать повторов
+        await cb.answer(notification=" ")
+
         if cb.user.user_id != ADMIN_USER_ID:
-            await cb.answer(notification="❌ Нет доступа.")
+            await cb.send("❌ Нет доступа.", keyboard=kb_back_to_menu())
             return
         order_id = int(cb.payload.split(":")[-1])
-        await cb.answer(notification="Оплата подтверждена!")
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order:
-                await cb.answer("❌ Заказ не найден.",keyboard=kb_back_to_menu())
+                await cb.send("❌ Заказ не найден.", keyboard=kb_back_to_menu())
                 return
             order.status = OrderStatus.confirmed
             await session.commit()
@@ -145,25 +148,29 @@ def register(bot: aiomax.Bot) -> None:
             user_id=client_id,
             text="📱 Введите ваш номер телефона для связи:"
         )
+        # Отправляем подтверждение админу (редактируем текущее сообщение или отправляем новое)
         await cb.send(f"✅ Заказ #{order_id} подтверждён. Ожидаем телефон от клиента.")
+
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:pay_fail:"))
     async def admin_pay_fail(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        logger.info(f"CALLBACK admin:pay_fail user_id={cb.user.user_id}")
+        await cb.answer(notification=" ")
+
         if cb.user.user_id != ADMIN_USER_ID:
-            await cb.answer(notification="❌ Нет доступа.")
+            await cb.send("❌ Нет доступа.", keyboard=kb_back_to_menu())
             return
         order_id = int(cb.payload.split(":")[-1])
-        await cb.answer(notification="Оплата отклонена.")
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order:
-                await cb.answer("❌ Заказ не найден.",keyboard=kb_back_to_menu())
+                await cb.send("❌ Заказ не найден.", keyboard=kb_back_to_menu())
                 return
             order.status = OrderStatus.pending
             await session.commit()
             client_id = order.user_id
 
         await bot.send_message(
-            user_id=client_id,  # было chat_id — исправлено
+            user_id=client_id,
             text=(
                 f"❌ Оплата заказа #{order_id} не подтверждена.\n"
                 "Проверьте реквизиты и попробуйте снова или напишите администратору."

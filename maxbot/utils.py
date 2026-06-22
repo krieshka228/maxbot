@@ -212,3 +212,30 @@ async def get_max_attachments(bot, session, product) -> list:
             if token:
                 attachments.append(aiomax.VideoAttachment(token=token))
     return attachments
+import aiohttp
+from maxbot.config import settings
+
+MAX_API_BASE = "https://platform-api.max.ru"
+
+async def send_video_direct(user_id: int, video_token: str, text: str = "📹") -> bool:
+    """Отправляет видео напрямую через Max API, минуя aiomax."""
+    headers = {"Authorization": settings.max_bot_token}
+    payload = {
+        "text": text,
+        "attachments": [{
+            "type": "video",
+            "payload": {"token": video_token}
+        }]
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{MAX_API_BASE}/messages?user_id={user_id}",
+            headers=headers,
+            json=payload
+        ) as resp:
+            if resp.status == 200:
+                logger.info(f"Видео отправлено пользователю {user_id}")
+                return True
+            else:
+                logger.error(f"Ошибка отправки видео: {resp.status} {await resp.text()}")
+                return False

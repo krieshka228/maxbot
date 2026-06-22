@@ -50,7 +50,9 @@ def register(bot: aiomax.Bot) -> None:
             order = await get_draft_order(session, user_id)
 
         if order is None or not order.items:
-            await cb.send(
+            # Редактируем текущее сообщение, а не создаём новое
+            await bot.edit_message(
+                message_id=cb.message.id,
                 text="🛒 Ваша корзина пуста.\n\nПерейдите в каталог и добавьте товары.",
                 keyboard=kb_back_to_menu(),
             )
@@ -62,6 +64,7 @@ def register(bot: aiomax.Bot) -> None:
             format="markdown",
             keyboard=kb_cart_actions(order.id, has_items=True),
         )
+
 
     # ── Удалить позицию (выбор) ───────────────────────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:remove:"))
