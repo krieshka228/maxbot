@@ -142,11 +142,28 @@ def register(bot: aiomax.Bot) -> None:
         data = cursor.get_data() or {}
         order_id = data.get("order_id")
 
-        # Сохраняем адрес пока только в FSM, не пишем в базу
+        # Сначала сохраняем адрес в заказе в базе данных
+        async for session in get_session():
+            order = await get_order_with_items(session, order_id)
+            if not order or order.user_id != user_id:
+                cursor.clear()
+                await message.reply("❌ Заказ не найден.")
+                return
+            order.delivery_address = address
+            user = await get_or_create_user(
+                session, user_id,
+                full_name=message.sender.name,
+                username=getattr(message.sender, 'username', None),
+                platform="MAX"
+            )
+            user.address = address
+            await session.commit()
+
+        # Теперь сохраняем адрес в FSM (для редактирования) и переходим к подтверждению
         cursor.change_data({"order_id": order_id, "address": address})
         cursor.change_state(UserStates.AWAITING_CONFIRMATION)
 
-        # Получаем текущие данные заказа для отображения
+        # Получаем актуальные данные заказа для отображения (уже с адресом)
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order or order.user_id != user_id:
@@ -169,14 +186,13 @@ def register(bot: aiomax.Bot) -> None:
                 f"📋 **Проверьте данные заказа #{order_id}:**\n\n"
                 f"📱 Телефон: {phone}\n"
                 f"🚚 Доставка: {delivery_method}\n"
-                f"📍 Адрес: {address}\n\n"
+                f"📍 Адрес: {order.delivery_address or address}\n\n"
                 f"🛒 **Товары:**\n{items_text}\n\n"
                 f"💰 **Итого: {order.total_amount:.0f} ₽**\n\n"
                 "Если всё верно, нажмите «✅ Всё верно, оформить».",
                 keyboard=kb,
                 format="markdown"
             )
-
     # ── Обработчик кнопки "Изменить заказ" ─────────────────────────────
     @bot.on_button_callback("edit:order")
     async def edit_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):

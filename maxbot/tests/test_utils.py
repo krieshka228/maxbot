@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils import build_post_text, format_cart, format_order_for_admin, parse_quantity
+from maxbot.utils import build_post_text, format_cart, format_order_for_admin, parse_quantity
 
 
 # --------------------------- parse_quantity ---------------------------
@@ -31,7 +31,7 @@ def test_parse_quantity_invalid(raw):
 
 
 def test_parse_quantity_rejects_overflow():
-    from validators import MAX_QUANTITY
+    from maxbot.validators import MAX_QUANTITY
     assert parse_quantity(str(MAX_QUANTITY + 1)) is None
     assert parse_quantity(str(MAX_QUANTITY)) == MAX_QUANTITY
 

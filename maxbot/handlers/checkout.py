@@ -116,9 +116,13 @@ def register(bot: aiomax.Bot) -> None:
             except Exception as e:
                 logger.warning(f"Не удалось уведомить администратора об отмене: {e}")
 
+            
+            order_info = format_order_for_admin(order)
+            text = f"❌ **Заказ #{order_id} отменён.**\n\n{order_info}"
             await cb.send(
-                f"❌ Заказ #{order_id} отменён.",
+                text,
                 keyboard=kb_back_to_menu(),
+                format="markdown"
             )
 
     # ── Администратор: подтверждение оплаты ──────────────────────────────

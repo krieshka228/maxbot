@@ -12,7 +12,7 @@ def parse_quantity(text: str) -> Optional[int]:
     """Возвращает целое число из строки (допускает суффикс «шт.»/«ед.»),
     иначе None. Верхняя граница — validators.MAX_QUANTITY (защита от
     переполнения/абьюза, см. validators.py)."""
-    from validators import MAX_QUANTITY
+    from maxbot.validators import MAX_QUANTITY
     m = _QTY_RE.match(text.strip())
     if m:
         qty = int(m.group(1))
@@ -95,7 +95,7 @@ def format_cart(order) -> str:
 
 
 async def check_payment_qr() -> bool:
-    from db import get_session, get_bot_setting
+    from maxbot.db import get_session, get_bot_setting
     async for session in get_session():
         token = await get_bot_setting(session, "payment_qr_token")
         return bool(token)

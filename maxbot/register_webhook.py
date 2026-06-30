@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import aiohttp
-from config import BOT_TOKEN
+from maxbot.config import BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@
 
 import pytest
 
-from config import Settings
+from maxbot.config import Settings
 
 # _env_file=None — игнорируем реальный .env, чтобы тесты были детерминированы
 # и не зависели от секретов разработчика.

@@ -1,5 +1,5 @@
 import aiohttp
-from config import BOT_TOKEN
+from maxbot.config import BOT_TOKEN
 
 BASE_URL = "https://platform-api.max.ru"
 
@@ -33,7 +33,7 @@ maxbot/api.py — Прямые запросы к API MAX.
 """
 
 import aiohttp
-from config import BOT_TOKEN
+from maxbot.config import BOT_TOKEN
 
 BASE_URL = "https://platform-api.max.ru"
 

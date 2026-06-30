@@ -3,7 +3,7 @@
 
 import pytest
 
-from validators import (
+from maxbot.validators import (
     MAX_QUANTITY,
     is_valid_article,
     normalize_phone,
