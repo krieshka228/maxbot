@@ -70,7 +70,7 @@ def register(bot: aiomax.Bot) -> None:
     async def show_level1_categories(cb: aiomax.Callback):
         user_id = cb.user.user_id
 
-        # Удаляем старое навигационное сообщение
+        # Удаляем старое навигационное сообщение (пагинацию), если оно было
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -85,38 +85,18 @@ def register(bot: aiomax.Bot) -> None:
         kb = KeyboardBuilder()
         if not categories:
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            # Отправляем новое сообщение
-            msg = await cb.send(text="📭 В каталоге пока нет товаров.", keyboard=kb)
-            _category_messages[user_id] = msg.id
-            # Удаляем исходное сообщение, из которого пришёл callback
-            try:
-                await bot.delete_message(cb.message.id)
-            except Exception:
-                pass
+            # Редактируем исходное сообщение
+            await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
+            _category_messages[user_id] = cb.message.id
             return
 
         for cat in categories:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        msg = await cb.send(text="**Выберите категорию:**", keyboard=kb, format="markdown")
-        _category_messages[user_id] = msg.id
-
-        # Удаляем исходное сообщение
-        try:
-            await bot.delete_message(cb.message.id)
-        except Exception:
-            pass
-
-        # Удаляем предыдущее сообщение со списком категорий, если оно было и не совпадает с новым
-        prev_msg_id = _category_messages.pop(user_id, None)
-        if prev_msg_id is not None and prev_msg_id != msg.id:
-            try:
-                await bot.delete_message(prev_msg_id)
-            except Exception:
-                pass
-        # Сохраняем ID нового сообщения
-        _category_messages[user_id] = msg.id
+        # Редактируем исходное сообщение
+        await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
+        _category_messages[user_id] = cb.message.id
 
     # ------------------- Уровень 2: Подкатегории -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:level1:"))
@@ -161,12 +141,8 @@ def register(bot: aiomax.Bot) -> None:
         if not subcategories:
             kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            msg = await cb.send(text=f"В категории «{category}» пока нет подкатегорий.", keyboard=kb)
-            _category_messages[user_id] = msg.id
-            try:
-                await bot.delete_message(cb.message.id)
-            except Exception:
-                pass
+            await cb.answer(text=f"В категории «{category}» пока нет подкатегорий.", keyboard=kb)
+            _category_messages[user_id] = cb.message.id
             return
 
         for sub in sorted(subcategories):
@@ -174,23 +150,8 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        msg = await cb.send(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
-        _category_messages[user_id] = msg.id
-
-        # Удаляем исходное сообщение
-        try:
-            await bot.delete_message(cb.message.id)
-        except Exception:
-            pass
-
-        # Удаляем предыдущее сообщение со списком подкатегорий, если оно было
-        prev_msg_id = _category_messages.pop(user_id, None)
-        if prev_msg_id is not None and prev_msg_id != msg.id:
-            try:
-                await bot.delete_message(prev_msg_id)
-            except Exception:
-                pass
-        _category_messages[user_id] = msg.id
+        await cb.answer(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
+        _category_messages[user_id] = cb.message.id
 
     # ------------------- Уровень 3: Товары (с пагинацией) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
