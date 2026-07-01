@@ -1,7 +1,17 @@
 """
 handlers/catalog.py — Каталог для покупателей: категории, товары с фото, поиск, заказ.
 Показываются только активные товары (is_active == True).
-Реализовано атомарное резервирование только при оформлении заказа.
+
+Структура навигации (3 уровня):
+    🏠 Главная → 📦 Категория → 📱 Подкатегория
+
+* Категории и подкатегории — это ОДНО текстовое сообщение, которое
+  редактируется на месте (cb.answer()), поэтому переходы между
+  ними не плодят дубли.
+* Товары показываются медиа-карточками: каждый товар — отдельное сообщение
+  с фото/видео и подписью и кнопкой «🛒 Заказать».
+* При переключении страницы все ранее отправленные карточки и навигационное
+  сообщение удаляются перед отправкой новых.
 """
 
 import logging
@@ -11,42 +21,52 @@ from aiomax import fsm, filters
 from aiomax.buttons import KeyboardBuilder, CallbackButton
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
+
 from db import (
-    get_session, Product, get_or_create_user, get_or_create_draft, add_item_to_order,
-    Order, OrderItem, get_active_categories, get_active_products_in_category,
+    get_session,
+    Product,
+    get_or_create_user,
+    get_or_create_draft,
+    add_item_to_order,
+    Order,
+    OrderItem,
+    get_active_categories,
+    get_active_products_in_category,
     get_all_active_products,
 )
-from keyboards import kb_cart_actions, kb_back_to_menu, kb_unavailable
+from keyboards import (
+    kb_cart_actions,
+    kb_back_to_menu,
+    kb_unavailable,
+    kb_main_menu,
+)
 from utils import (
-    format_cart, parse_quantity, check_payment_qr, get_max_attachments,
-    build_catalog_card_text
+    format_cart,
+    parse_quantity,
+    check_payment_qr,
+    get_max_attachments,
+    build_catalog_card_text,
 )
 from config import ADMIN_USER_ID
 from cache import invalidate_catalog_cache
 
 logger = logging.getLogger(__name__)
-ITEMS_PER_PAGE = 3
 
+PRODUCTS_PER_PAGE = 3
+LIST_PER_PAGE = 8
+
+# Глобальные словари для хранения ID сообщений
 _catalog_messages: dict[int, list[str]] = {}   # карточки товаров
 _nav_messages: dict[int, str] = {}             # ID навигационного сообщения
-_category_messages: dict[int, str] = {}         # ID сообщения со списком подкатегорий
-
-async def safe_edit_or_send(cb: aiomax.Callback, text: str, keyboard, format: str = "markdown"):
-    """Пытается отредактировать сообщение, если не получается – отправляет новое."""
-    try:
-        await cb.answer(text=text, keyboard=keyboard, format=format)
-        return cb.message.id
-    except Exception as e:
-        logger.warning(f"Не удалось отредактировать сообщение: {e}, отправляем новое")
-        msg = await cb.send(text=text, keyboard=keyboard, format=format)
-        return msg.id
+_category_messages: dict[int, str] = {}         # ID сообщения со списком категорий
 
 
-async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, also_delete_message_id: str | None = None):
+async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, keep_current: bool = False):
     """Удаляет все сохранённые карточки товаров для пользователя."""
     ids_to_delete = _catalog_messages.pop(user_id, [])[:]
-    if also_delete_message_id and also_delete_message_id not in ids_to_delete:
-        ids_to_delete.append(also_delete_message_id)
+    nav_id = _nav_messages.pop(user_id, None)
+    if nav_id:
+        ids_to_delete.append(nav_id)
     if not ids_to_delete:
         return
 
@@ -59,11 +79,29 @@ async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, also_delete_mes
     await asyncio.gather(*(_safe_delete(mid) for mid in ids_to_delete))
 
 
+def _crumbs(category: str | None = None, subcategory: str | None = None) -> str:
+    """«Хлебные крошки»: 🏠 Главная → 📦 Категория → 📱 Подкатегория."""
+    parts = ["🏠 Главная"]
+    if category:
+        parts.append(f"📦 {category}")
+    if subcategory:
+        parts.append(f"📱 {subcategory}")
+    return " → ".join(parts)
+
+
+def _subcategory_of(product) -> str:
+    """Подкатегория = часть названия до первой запятой."""
+    name = product.name or ""
+    return name.split(",")[0].strip() if "," in name else name.strip()
+
+
 def register(bot: aiomax.Bot) -> None:
 
-    # ------------------- Уровень 1: Категории -----------------------
+    # ========================== УРОВЕНЬ 1: КАТЕГОРИИ ==========================
+
     @bot.on_button_callback("catalog:show")
-    async def catalog_show_level1(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+    async def catalog_show_categories(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает список категорий (редактирует текущее сообщение)."""
         user_id = cb.user.user_id
         if user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
@@ -73,55 +111,43 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # Удаляем карточки товаров
-        await delete_catalog_messages(user_id, bot)
-
-        # Удаляем навигационное сообщение
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-
+        # Удаляем карточки товаров и навигацию, но НЕ удаляем текущее сообщение
+        await delete_catalog_messages(user_id, bot, keep_current=True)
         cursor.change_data({})
-        await show_level1_categories(cb)
-
-    async def show_level1_categories(cb: aiomax.Callback):
-        user_id = cb.user.user_id
-
-        # Удаляем старое навигационное сообщение
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
 
         async for session in get_session():
-            categories = await get_active_categories(session)
-            break
+            products = await get_all_active_products(session)
 
-        kb = KeyboardBuilder()
-        if not categories:
+        counts = {}
+        for p in products:
+            if p.category:
+                counts[p.category] = counts.get(p.category, 0) + 1
+
+        if not counts:
+            kb = KeyboardBuilder()
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            msg_id = await safe_edit_or_send(cb, "📭 В каталоге пока нет товаров.", kb)
-            _category_messages[user_id] = msg_id
+            await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
+            _category_messages[user_id] = cb.message.id
             return
 
-        for cat in categories:
-            kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
+        kb = KeyboardBuilder()
+        for cat in sorted(counts):
+            kb.row(CallbackButton(f"📦 {cat} ({counts[cat]})", f"catalog:category:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        msg_id = await safe_edit_or_send(cb, "**Выберите категорию:**", kb)
-        _category_messages[user_id] = msg_id
+        await cb.answer(
+            text=f"{_crumbs()}\n📂 **Категории**",
+            keyboard=kb,
+            format="markdown"
+        )
+        _category_messages[user_id] = cb.message.id
 
-    # ------------------- Уровень 2: Подкатегории -----------------------
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:level1:"))
-    async def catalog_level2_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        await cb.answer(notification=" ")
-        user_id = cb.user.user_id
-        if user_id != ADMIN_USER_ID and not await check_payment_qr():
+    # ========================== УРОВЕНЬ 2: ПОДКАТЕГОРИИ ==========================
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
+    async def catalog_show_subcategories(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает подкатегории выбранной категории."""
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
                 text="⚠️ Бот временно недоступен. Приносим извинения.",
                 keyboard=kb_unavailable(),
@@ -130,61 +156,53 @@ def register(bot: aiomax.Bot) -> None:
             return
 
         category = cb.payload.split(":", 2)[2]
-
-        # Удаляем карточки товаров
-        await delete_catalog_messages(user_id, bot)
-
-        # Удаляем навигационное сообщение
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-
-        await show_level2_categories(cb, category)
-    async def show_level2_categories(cb: aiomax.Callback, category: str):
         user_id = cb.user.user_id
 
-        # Удаляем навигационное сообщение, если было
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
+        # Удаляем карточки, но НЕ удаляем текущее сообщение
+        await delete_catalog_messages(user_id, bot, keep_current=True)
+
+        # Сохраняем текущую категорию в FSM
+        data = cursor.get_data() or {}
+        data["catalog_category"] = category
+        cursor.change_data(data)
 
         async for session in get_session():
             products = await get_active_products_in_category(session, category)
-            break
 
-        subcategories = {}
+        counts = {}
         for p in products:
-            if ',' in p.name:
-                sub = p.name.split(',')[0].strip()
-            else:
-                sub = p.name.strip()
-            subcategories[sub] = subcategories.get(sub, 0) + 1
+            sub = _subcategory_of(p)
+            counts[sub] = counts.get(sub, 0) + 1
 
-        kb = KeyboardBuilder()
-        if not subcategories:
+        if not counts:
+            kb = KeyboardBuilder()
             kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            msg_id = await safe_edit_or_send(cb, f"В категории «{category}» пока нет подкатегорий.", kb)
-            _category_messages[user_id] = msg_id
+            await cb.answer(
+                text=f"{_crumbs(category)}\n\nВ этой категории пока нет товаров 😔",
+                keyboard=kb
+            )
+            _category_messages[user_id] = cb.message.id
             return
 
-        for sub in sorted(subcategories):
-            kb.row(CallbackButton(f"{sub} ({subcategories[sub]})", f"catalog:category:{category}:{sub}"))
+        kb = KeyboardBuilder()
+        for sub in sorted(counts):
+            kb.row(CallbackButton(f"📱 {sub} ({counts[sub]})", f"catalog:subcategory:{category}:{sub}"))
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        msg_id = await safe_edit_or_send(cb, f"**{category}** — выберите подкатегорию:", kb)
-        _category_messages[user_id] = msg_id
+        await cb.answer(
+            text=f"{_crumbs(category)}\nВыберите подкатегорию:",
+            keyboard=kb,
+            format="markdown"
+        )
+        _category_messages[user_id] = cb.message.id
 
-    # ------------------- Уровень 3: Товары (с пагинацией) -----------------------
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
-    async def catalog_category_page(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+    # ========================== УРОВЕНЬ 3: ТОВАРЫ ==========================
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:subcategory:"))
+    async def catalog_show_products(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает товары подкатегории (медиа-карточки + навигация)."""
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
                 text="⚠️ Бот временно недоступен. Приносим извинения.",
@@ -198,35 +216,27 @@ def register(bot: aiomax.Bot) -> None:
         subcategory = parts[3]
         user_id = cb.user.user_id
 
-        # Удаляем карточки товаров
-        await delete_catalog_messages(user_id, bot)
+        # Удаляем карточки и навигацию
+        await delete_catalog_messages(user_id, bot, keep_current=False)
 
-        # Удаляем навигационное сообщение
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
+        # Удаляем текущее сообщение (оно было с подкатегориями)
+        try:
+            await bot.delete_message(cb.message.id)
+        except Exception:
+            pass
 
-        # Удаляем СТАРОЕ сообщение с подкатегориями
-        category_msg_id = _category_messages.pop(user_id, None)
-        if category_msg_id and category_msg_id != cb.message.id:
-            try:
-                await bot.delete_message(category_msg_id)
-            except Exception:
-                pass
+        # Сохраняем контекст
+        data = cursor.get_data() or {}
+        data["catalog_category"] = category
+        data["catalog_subcategory"] = subcategory
+        data["catalog_page"] = 0
+        cursor.change_data(data)
 
-        cursor.change_data({
-            "catalog_category": category,
-            "catalog_subcategory": subcategory,
-            "catalog_page": 0
-        })
+        await _show_products_page(bot, cb, category, subcategory, 0)
 
-        await show_category_page(bot, cb, category, subcategory, 0)
-
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:catpage:"))
-    async def catalog_catpage(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:prodpage:"))
+    async def catalog_prodpage(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Обработчик пагинации товаров."""
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(
                 text="⚠️ Бот временно недоступен. Приносим извинения.",
@@ -241,14 +251,8 @@ def register(bot: aiomax.Bot) -> None:
         page = int(parts[4])
         user_id = cb.user.user_id
 
-        # Удаляем старую навигацию и карточки
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-        await delete_catalog_messages(user_id, bot)
+        # Удаляем старые карточки и навигацию
+        await delete_catalog_messages(user_id, bot, keep_current=False)
 
         cursor.change_data({
             "catalog_category": category,
@@ -256,47 +260,37 @@ def register(bot: aiomax.Bot) -> None:
             "catalog_page": page
         })
 
-        await show_category_page(bot, cb, category, subcategory, page)
+        await _show_products_page(bot, cb, category, subcategory, page)
 
-    async def show_category_page(bot, ctx, category: str, subcategory: str, page: int):
+    async def _show_products_page(bot, ctx, category: str, subcategory: str, page: int):
+        """Внутренняя функция: отправляет карточки товаров и навигацию."""
         user_id = ctx.user.user_id
 
-        # Удаляем старую навигацию (пагинацию)
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-
-        # НЕ УДАЛЯЕМ сообщение с подкатегориями – оно остаётся для редактирования
-
         async for session in get_session():
-            cat_products = await get_active_products_in_category(session, category)
-            matched = [
-                p for p in cat_products
-                if p.name == subcategory
-                   or p.name.startswith(subcategory + ",")
-                   or p.name.startswith(subcategory + " ,")
+            all_products = await get_active_products_in_category(session, category)
+            products = [
+                p for p in all_products
+                if p.name == subcategory or p.name.startswith(subcategory + ",")
             ]
 
-            if not matched:
+            if not products:
                 kb = KeyboardBuilder()
-                kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:level1:{category}"))
+                kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:category:{category}"))
                 kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
                 await ctx.send(
-                    text=f"В подкатегории «{subcategory}» пока нет товаров.",
+                    text=f"{_crumbs(category, subcategory)}\n\nВ этой подкатегории пока нет товаров 😔",
                     keyboard=kb
                 )
                 return
 
-            total = len(matched)
-            total_pages = (total - 1) // ITEMS_PER_PAGE + 1
+            total = len(products)
+            total_pages = (total - 1) // PRODUCTS_PER_PAGE + 1
             page = max(0, min(page, total_pages - 1))
-            products = matched[page * ITEMS_PER_PAGE: (page + 1) * ITEMS_PER_PAGE]
+            page_products = products[page * PRODUCTS_PER_PAGE: page * PRODUCTS_PER_PAGE + PRODUCTS_PER_PAGE]
 
+            # 1) Отправляем карточки товаров
             new_msgs = []
-            for product in products:
+            for product in page_products:
                 text = build_catalog_card_text(product)
                 kb = KeyboardBuilder()
                 kb.row(CallbackButton("🛒 Заказать", f"order:start:{product.id}"))
@@ -334,33 +328,39 @@ def register(bot: aiomax.Bot) -> None:
 
             _catalog_messages[user_id] = new_msgs
 
+            # 2) Навигационное сообщение
             nav_kb = KeyboardBuilder()
-            nav_row = []
             if page > 0:
-                nav_row.append(CallbackButton("← Назад", f"catalog:catpage:{category}:{subcategory}:{page - 1}"))
+                nav_kb.add(CallbackButton("◀️ Назад", f"catalog:prodpage:{category}:{subcategory}:{page - 1}"))
             if page < total_pages - 1:
-                nav_row.append(CallbackButton("Вперёд →", f"catalog:catpage:{category}:{subcategory}:{page + 1}"))
-            if nav_row:
-                nav_kb.row(*nav_row)
-            nav_kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:level1:{category}"))
+                nav_kb.add(CallbackButton("Вперёд ▶️", f"catalog:prodpage:{category}:{subcategory}:{page + 1}"))
+            if nav_kb._rows:
+                nav_kb.row()
+            nav_kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:category:{category}"))
             nav_kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-            nav_text = f"{category} → **{subcategory}** (стр. {page + 1}/{total_pages}, товаров: {total})"
+            nav_text = (
+                f"{_crumbs(category, subcategory)}\n"
+                f"🔎 Найдено {total} товаров. Страница {page + 1} из {total_pages}"
+            )
             nav_msg = await ctx.send(
                 text=nav_text,
                 format="markdown",
                 keyboard=nav_kb
             )
             _nav_messages[user_id] = nav_msg.id
-            break
 
-    # ------------------- Заказ (без резервирования в корзине) -----------------------
+    # ========================== ЗАКАЗ ==========================
+
     @bot.on_button_callback(lambda cb: cb.payload.startswith("order:start:"))
     async def start_order(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Кнопка «Заказать» – запрашивает количество."""
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
             await cb.answer(notification="Функционал временно недоступен. Напишите администратору.")
             return
+
         product_id = int(cb.payload.split(":")[-1])
+        user_id = cb.user.user_id
 
         product = None
         attachments = []
@@ -369,20 +369,19 @@ def register(bot: aiomax.Bot) -> None:
             if product and product.is_active:
                 attachments = await get_max_attachments(bot, session, product)
             break
+
         if not product or not product.is_active:
             await cb.answer(notification="❌ Товар недоступен.")
             return
 
-        user_id = cb.user.user_id
+        # Удаляем карточки и навигацию
+        await delete_catalog_messages(user_id, bot, keep_current=False)
 
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-
-        await delete_catalog_messages(user_id, bot)
+        # Удаляем текущее сообщение (навигацию)
+        try:
+            await bot.delete_message(cb.message.id)
+        except Exception:
+            pass
 
         text = product.name
         if product.article:
@@ -399,13 +398,12 @@ def register(bot: aiomax.Bot) -> None:
             attachments=attachments or None,
         )
 
-        # Читаем текущий контекст из FSM
+        # Читаем контекст из FSM
         data = cursor.get_data() or {}
         cat = data.get("catalog_category")
         sub = data.get("catalog_subcategory")
         pg = data.get("catalog_page", 0)
 
-        # Сохраняем всё вместе
         cursor.change_state("order_qty")
         cursor.change_data({
             "product_id": product_id,
@@ -417,6 +415,7 @@ def register(bot: aiomax.Bot) -> None:
 
     @bot.on_message(filters.state("order_qty"))
     async def handle_order_qty(message: aiomax.Message, cursor: fsm.FSMCursor):
+        """Обработка ввода количества."""
         qty = parse_quantity(message.body.text or "")
         data = cursor.get_data()
         product_id = data.get("product_id")
@@ -486,17 +485,7 @@ def register(bot: aiomax.Bot) -> None:
         confirm_text = f"✅ **{product.name}** × {qty} шт. добавлен в корзину!"
         kb = KeyboardBuilder()
         kb.row(CallbackButton("🛒 Перейти в корзину", "cart:view", intent='default'))
-
-        # Кнопка "Продолжить покупки" с контекстом
-        cat = data.get("catalog_category")
-        sub = data.get("catalog_subcategory")
-        pg = data.get("catalog_page", 0)
-
-        if cat and sub:
-            kb.row(CallbackButton("📦 Продолжить покупки", f"catalog:continue:{cat}:{sub}:{pg}", intent='default'))
-        else:
-            kb.row(CallbackButton("📦 Продолжить покупки", "catalog:show", intent='default'))
-
+        kb.row(CallbackButton("📦 Продолжить покупки", "catalog:show", intent='default'))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
 
         if card_msg_id:
@@ -510,57 +499,8 @@ def register(bot: aiomax.Bot) -> None:
         else:
             await message.reply(confirm_text, keyboard=kb, format="markdown")
 
-    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:continue:"))
-    async def catalog_continue(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
-            await cb.answer(
-                text="⚠️ Бот временно недоступен. Приносим извинения.",
-                keyboard=kb_unavailable(),
-                format="markdown"
-            )
-            return
+    # ========================== ПОИСК ==========================
 
-        parts = cb.payload.split(":")
-        category = parts[2]
-        subcategory = parts[3]
-        page = int(parts[4])
-        user_id = cb.user.user_id
-
-        # Удаляем карточки товаров при возврате
-        await delete_catalog_messages(user_id, bot)
-
-        async for session in get_session():
-            cat_products = await get_active_products_in_category(session, category)
-            matched = [
-                p for p in cat_products
-                if p.name == subcategory or p.name.startswith(subcategory + ",")
-            ]
-
-            if matched:
-                cursor.change_data({
-                    "catalog_category": category,
-                    "catalog_subcategory": subcategory,
-                    "catalog_page": page
-                })
-                await show_category_page(bot, cb, category, subcategory, page)
-                return
-
-            products = await get_active_products_in_category(session, category)
-            subcategories = {}
-            for p in products:
-                if ',' in p.name:
-                    sub = p.name.split(',')[0].strip()
-                else:
-                    sub = p.name.strip()
-                subcategories[sub] = subcategories.get(sub, 0) + 1
-
-            if subcategories:
-                await show_level2_categories(cb, category)
-            else:
-                await show_level1_categories(cb)
-            break
-
-    # ------------------- Поиск по артикулу -----------------------
     @bot.on_button_callback("search:article")
     async def search_article_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
@@ -624,7 +564,6 @@ def register(bot: aiomax.Bot) -> None:
 
         cursor.clear()
 
-    # ------------------- Поиск по названию -----------------------
     @bot.on_button_callback("search:name")
     async def search_name_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id

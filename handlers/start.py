@@ -95,22 +95,14 @@ def register(bot: aiomax.Bot) -> None:
 
         logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
 
-        from handlers.catalog import delete_catalog_messages, _nav_messages, _category_messages
+        from handlers.catalog import delete_catalog_messages, _category_messages
 
         cursor.clear()
 
-        # 1. Удаляем карточки товаров
-        await delete_catalog_messages(user_id, bot)
+        # 1. Удаляем карточки товаров и навигацию
+        await delete_catalog_messages(user_id, bot, keep_current=True)
 
-        # 2. Удаляем навигационное сообщение
-        nav_id = _nav_messages.pop(user_id, None)
-        if nav_id:
-            try:
-                await bot.delete_message(nav_id)
-            except Exception:
-                pass
-
-        # 3. Проверяем доступность
+        # 2. Проверяем доступность
         if is_admin:
             has_qr = True
         else:
@@ -124,22 +116,13 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # 4. Пытаемся отредактировать, если не получается – отправляем новое
-        try:
-            await cb.answer(
-                text="🏠 **Главное меню**\n\nВыберите действие:",
-                keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
-                format="markdown"
-            )
-            _category_messages[user_id] = cb.message.id
-        except Exception as e:
-            logger.warning(f"Не удалось отредактировать сообщение: {e}")
-            msg = await cb.send(
-                text="🏠 **Главное меню**\n\nВыберите действие:",
-                keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
-                format="markdown"
-            )
-            _category_messages[user_id] = msg.id
+        # 3. Редактируем текущее сообщение в главное меню
+        await cb.answer(
+            text="🏠 **Главное меню**\n\nВыберите действие:",
+            keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
+            format="markdown"
+        )
+        _category_messages[user_id] = cb.message.id
 
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
