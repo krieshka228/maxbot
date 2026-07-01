@@ -88,58 +88,37 @@ def register(bot: aiomax.Bot) -> None:
             keyboard=kb_main_menu(is_admin=False, has_qr=True),
         )
 
-    @bot.on_bot_start()
-    async def on_bot_start(payload: aiomax.BotStartPayload, cursor: fsm.FSMCursor):
-        user_id = payload.user.user_id
-        has_qr = await check_payment_qr()
-        async for session in get_session():
-            # Исправлено: payload.user вместо cb.user
-            user = await get_or_create_user(
-                session, user_id,
-                full_name=payload.user.name,
-                username=getattr(payload.user, "username", None),
-                platform="MAX"
-            )
-        if user_id == ADMIN_USER_ID:
-            cursor.clear()
-            await payload.send(
-                "👋 С возвращением! Выберите действие:",
-                keyboard=kb_main_menu(is_admin=True, has_qr=True),
-            )
-            return
-
-        if not has_qr:
-            cursor.clear()
-            await payload.send(
-                "⚠️ Бот временно недоступен. Приносим извинения.",
-                keyboard=kb_unavailable(),
-            )
-            return
-
-        cursor.clear()
-        await payload.send(
-            "👋 С возвращением! Выберите действие:",
-            keyboard=kb_main_menu(is_admin=False, has_qr=True),
-        )
-
     @bot.on_button_callback("menu:main")
     async def back_to_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
         is_admin = (user_id == ADMIN_USER_ID)
 
         logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
-        if is_admin:
-            cursor.clear()
-            await delete_catalog_messages(user_id, bot)
-            await cb.answer(
-                text="🏠 Главное меню:",
-                keyboard=kb_main_menu(is_admin=True, has_qr=True),
-                attachments=[],
-                format="markdown"
-            )
-            return
 
-        if not await check_payment_qr():
+        # Импортируем глобальные словари из catalog
+        from handlers.catalog import delete_catalog_messages, _nav_messages, _category_messages
+
+        # Очищаем состояние FSM
+        cursor.clear()
+
+        # 1. Удаляем карточки товаров
+        await delete_catalog_messages(user_id, bot)
+
+        # 2. Удаляем навигационное сообщение (пагинацию)
+        nav_id = _nav_messages.pop(user_id, None)
+        if nav_id:
+            try:
+                await bot.delete_message(nav_id)
+            except Exception:
+                pass
+
+        # 3. Проверяем доступность бота
+        if is_admin:
+            has_qr = True
+        else:
+            has_qr = await check_payment_qr()
+
+        if not has_qr and not is_admin:
             await cb.answer(
                 text="⚠️ Бот временно недоступен. Приносим извинения.",
                 keyboard=kb_unavailable(),
@@ -147,12 +126,32 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        cursor.clear()
-        await delete_catalog_messages(user_id, bot)
+        # 4. Пытаемся отредактировать существующее сообщение с категориями/подкатегориями
+        category_msg_id = _category_messages.pop(user_id, None)
+        if category_msg_id:
+            try:
+                await bot.edit_message(
+                    message_id=category_msg_id,
+                    text="🏠 **Главное меню**\n\nВыберите действие:",
+                    keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
+                    format="markdown",
+                    attachments=[],  # Удаляем вложения, если были
+                )
+                # Сохраняем ID отредактированного сообщения
+                _category_messages[user_id] = category_msg_id
+                return
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение в главное меню: {e}")
+                # Если редактирование не удалось – удаляем сообщение
+                try:
+                    await bot.delete_message(category_msg_id)
+                except Exception:
+                    pass
+
+        # 5. Если нет сообщения для редактирования – отправляем новое
         await cb.answer(
-            text="🏠 Главное меню:",
-            keyboard=kb_main_menu(is_admin=False, has_qr=True),
-            attachments=[],
+            text="🏠 **Главное меню**\n\nВыберите действие:",
+            keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
             format="markdown"
         )
 
