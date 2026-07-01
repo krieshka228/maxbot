@@ -95,16 +95,15 @@ def register(bot: aiomax.Bot) -> None:
 
         logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
 
-        # Импортируем глобальные словари из catalog
+        # Импортируем из catalog
         from handlers.catalog import delete_catalog_messages, _nav_messages, _category_messages
 
-        # Очищаем состояние FSM
         cursor.clear()
 
         # 1. Удаляем карточки товаров
         await delete_catalog_messages(user_id, bot)
 
-        # 2. Удаляем навигационное сообщение (пагинацию)
+        # 2. Удаляем навигационное сообщение
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -112,7 +111,7 @@ def register(bot: aiomax.Bot) -> None:
             except Exception:
                 pass
 
-        # 3. Проверяем доступность бота
+        # 3. Проверяем доступность
         if is_admin:
             has_qr = True
         else:
@@ -126,34 +125,14 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # 4. Пытаемся отредактировать существующее сообщение с категориями/подкатегориями
-        category_msg_id = _category_messages.pop(user_id, None)
-        if category_msg_id:
-            try:
-                await bot.edit_message(
-                    message_id=category_msg_id,
-                    text="🏠 **Главное меню**\n\nВыберите действие:",
-                    keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
-                    format="markdown",
-                    attachments=[],  # Удаляем вложения, если были
-                )
-                # Сохраняем ID отредактированного сообщения
-                _category_messages[user_id] = category_msg_id
-                return
-            except Exception as e:
-                logger.warning(f"Не удалось отредактировать сообщение в главное меню: {e}")
-                # Если редактирование не удалось – удаляем сообщение
-                try:
-                    await bot.delete_message(category_msg_id)
-                except Exception:
-                    pass
-
-        # 5. Если нет сообщения для редактирования – отправляем новое
+        # 4. Редактируем текущее сообщение (на которое пришёл callback)
         await cb.answer(
             text="🏠 **Главное меню**\n\nВыберите действие:",
             keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
             format="markdown"
         )
+        # Сохраняем ID отредактированного сообщения
+        _category_messages[user_id] = cb.message.id
 
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):

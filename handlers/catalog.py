@@ -63,7 +63,7 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # Удаляем карточки товаров (они больше не нужны)
+        # Удаляем карточки товаров
         await delete_catalog_messages(user_id, bot)
 
         # Удаляем навигационное сообщение
@@ -75,10 +75,18 @@ def register(bot: aiomax.Bot) -> None:
                 pass
 
         cursor.change_data({})
-        await show_level1_categories(cb)
+        await show_level1_categories(cb)  # здесь cb.answer() отредактирует текущее сообщение
 
     async def show_level1_categories(cb: aiomax.Callback):
         user_id = cb.user.user_id
+
+        # Удаляем старое навигационное сообщение
+        nav_id = _nav_messages.pop(user_id, None)
+        if nav_id:
+            try:
+                await bot.delete_message(nav_id)
+            except Exception:
+                pass
 
         async for session in get_session():
             categories = await get_active_categories(session)
@@ -95,6 +103,7 @@ def register(bot: aiomax.Bot) -> None:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
+        # Редактируем исходное сообщение
         await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
         _category_messages[user_id] = cb.message.id
 
@@ -113,7 +122,7 @@ def register(bot: aiomax.Bot) -> None:
 
         category = cb.payload.split(":", 2)[2]
 
-        # Удаляем карточки товаров (если были)
+        # Удаляем карточки товаров
         await delete_catalog_messages(user_id, bot)
 
         # Удаляем навигационное сообщение
@@ -124,10 +133,18 @@ def register(bot: aiomax.Bot) -> None:
             except Exception:
                 pass
 
-        await show_level2_categories(cb, category)
+        await show_level2_categories(cb, category)  # здесь cb.answer() отредактирует текущее сообщение
 
     async def show_level2_categories(cb: aiomax.Callback, category: str):
         user_id = cb.user.user_id
+
+        # Удаляем навигационное сообщение, если было
+        nav_id = _nav_messages.pop(user_id, None)
+        if nav_id:
+            try:
+                await bot.delete_message(nav_id)
+            except Exception:
+                pass
 
         async for session in get_session():
             products = await get_active_products_in_category(session, category)
@@ -154,6 +171,7 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
+        # Редактируем исходное сообщение
         await cb.answer(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
         _category_messages[user_id] = cb.message.id
 
@@ -173,7 +191,7 @@ def register(bot: aiomax.Bot) -> None:
         subcategory = parts[3]
         user_id = cb.user.user_id
 
-        # Удаляем карточки товаров (если были)
+        # Удаляем карточки товаров
         await delete_catalog_messages(user_id, bot)
 
         # Удаляем навигационное сообщение
@@ -181,6 +199,14 @@ def register(bot: aiomax.Bot) -> None:
         if nav_id:
             try:
                 await bot.delete_message(nav_id)
+            except Exception:
+                pass
+
+        # Удаляем СТАРОЕ сообщение с подкатегориями – его заменит show_category_page
+        category_msg_id = _category_messages.pop(user_id, None)
+        if category_msg_id and category_msg_id != cb.message.id:
+            try:
+                await bot.delete_message(category_msg_id)
             except Exception:
                 pass
 
@@ -208,7 +234,7 @@ def register(bot: aiomax.Bot) -> None:
         page = int(parts[4])
         user_id = cb.user.user_id
 
-        # Удаляем старую навигацию (пагинацию) и карточки
+        # Удаляем старую навигацию и карточки
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -227,6 +253,16 @@ def register(bot: aiomax.Bot) -> None:
 
     async def show_category_page(bot, ctx, category: str, subcategory: str, page: int):
         user_id = ctx.user.user_id
+
+        # Удаляем старую навигацию (пагинацию)
+        nav_id = _nav_messages.pop(user_id, None)
+        if nav_id:
+            try:
+                await bot.delete_message(nav_id)
+            except Exception:
+                pass
+
+        # НЕ УДАЛЯЕМ сообщение с подкатегориями – оно остаётся для редактирования
 
         async for session in get_session():
             cat_products = await get_active_products_in_category(session, category)
