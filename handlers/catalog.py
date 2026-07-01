@@ -61,6 +61,21 @@ _nav_messages: dict[int, str] = {}             # ID навигационного
 _category_messages: dict[int, str] = {}         # ID сообщения со списком категорий
 
 
+async def safe_edit_or_send(cb: aiomax.Callback, text: str, keyboard, format: str = "markdown"):
+    """Пытается отредактировать сообщение, если не получается – отправляет новое."""
+    try:
+        await cb.answer(text=text, keyboard=keyboard, format=format)
+        return cb.message.id
+    except Exception as e:
+        logger.warning(f"Не удалось отредактировать сообщение: {e}, отправляем новое")
+        try:
+            await bot.delete_message(cb.message.id)
+        except Exception:
+            pass
+        msg = await cb.send(text=text, keyboard=keyboard, format=format)
+        return msg.id
+
+
 async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, keep_current: bool = False):
     """Удаляет все сохранённые карточки товаров для пользователя."""
     ids_to_delete = _catalog_messages.pop(user_id, [])[:]
@@ -126,8 +141,8 @@ def register(bot: aiomax.Bot) -> None:
         if not counts:
             kb = KeyboardBuilder()
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
-            _category_messages[user_id] = cb.message.id
+            msg_id = await safe_edit_or_send(cb, "📭 В каталоге пока нет товаров.", kb)
+            _category_messages[user_id] = msg_id
             return
 
         kb = KeyboardBuilder()
@@ -135,12 +150,13 @@ def register(bot: aiomax.Bot) -> None:
             kb.row(CallbackButton(f"📦 {cat} ({counts[cat]})", f"catalog:category:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        await cb.answer(
-            text=f"{_crumbs()}\n📂 **Категории**",
-            keyboard=kb,
+        msg_id = await safe_edit_or_send(
+            cb,
+            f"{_crumbs()}\n📂 **Категории**",
+            kb,
             format="markdown"
         )
-        _category_messages[user_id] = cb.message.id
+        _category_messages[user_id] = msg_id
 
     # ========================== УРОВЕНЬ 2: ПОДКАТЕГОРИИ ==========================
 
@@ -178,11 +194,12 @@ def register(bot: aiomax.Bot) -> None:
             kb = KeyboardBuilder()
             kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            await cb.answer(
-                text=f"{_crumbs(category)}\n\nВ этой категории пока нет товаров 😔",
-                keyboard=kb
+            msg_id = await safe_edit_or_send(
+                cb,
+                f"{_crumbs(category)}\n\nВ этой категории пока нет товаров 😔",
+                kb
             )
-            _category_messages[user_id] = cb.message.id
+            _category_messages[user_id] = msg_id
             return
 
         kb = KeyboardBuilder()
@@ -191,12 +208,13 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        await cb.answer(
-            text=f"{_crumbs(category)}\nВыберите подкатегорию:",
-            keyboard=kb,
+        msg_id = await safe_edit_or_send(
+            cb,
+            f"{_crumbs(category)}\nВыберите подкатегорию:",
+            kb,
             format="markdown"
         )
-        _category_messages[user_id] = cb.message.id
+        _category_messages[user_id] = msg_id
 
     # ========================== УРОВЕНЬ 3: ТОВАРЫ ==========================
 
@@ -328,7 +346,7 @@ def register(bot: aiomax.Bot) -> None:
 
             _catalog_messages[user_id] = new_msgs
 
-            # 2) Навигационное сообщение (ИСПРАВЛЕНО)
+            # 2) Навигационное сообщение
             nav_kb = KeyboardBuilder()
             nav_row = []
             if page > 0:
