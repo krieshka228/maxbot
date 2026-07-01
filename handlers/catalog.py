@@ -62,15 +62,26 @@ def register(bot: aiomax.Bot) -> None:
                 format="markdown"
             )
             return
+
+        # Удаляем навигационное сообщение (пагинацию)
+        nav_id = _nav_messages.pop(user_id, None)
+        if nav_id:
+            try:
+                await bot.delete_message(nav_id)
+            except Exception:
+                pass
+
+        # Удаляем карточки товаров
         await delete_catalog_messages(user_id, bot)
-        # Очищаем контекст
+
+        # НЕ УДАЛЯЕМ само callback-сообщение – мы будем его редактировать
         cursor.change_data({})
         await show_level1_categories(cb)
 
     async def show_level1_categories(cb: aiomax.Callback):
         user_id = cb.user.user_id
 
-        # Удаляем старое навигационное сообщение (пагинацию)
+        # Удаляем старое навигационное сообщение (пагинацию), если оно было
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -93,6 +104,7 @@ def register(bot: aiomax.Bot) -> None:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
+        # Редактируем исходное сообщение (НЕ удаляем его!)
         await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
         _category_messages[user_id] = cb.message.id
 
@@ -109,7 +121,11 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
         category = cb.payload.split(":", 2)[2]
+
+        # Удаляем карточки товаров (если были)
         await delete_catalog_messages(user_id, bot)
+
+        # НЕ удаляем само callback-сообщение!
         await show_level2_categories(cb, category)
 
     async def show_level2_categories(cb: aiomax.Callback, category: str):
@@ -148,6 +164,7 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
+        # Редактируем исходное сообщение
         await cb.answer(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
         _category_messages[user_id] = cb.message.id
 
@@ -165,9 +182,10 @@ def register(bot: aiomax.Bot) -> None:
         category = parts[2]
         subcategory = parts[3]
         user_id = cb.user.user_id
+
+        # Удаляем только карточки товаров, НЕ удаляем сообщение с подкатегориями!
         await delete_catalog_messages(user_id, bot)
 
-        # Сохраняем контекст в FSM
         cursor.change_data({
             "catalog_category": category,
             "catalog_subcategory": subcategory,
