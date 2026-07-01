@@ -95,7 +95,6 @@ def register(bot: aiomax.Bot) -> None:
 
         logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
 
-        # Импортируем из catalog
         from handlers.catalog import delete_catalog_messages, _nav_messages, _category_messages
 
         cursor.clear()
@@ -125,14 +124,22 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # 4. Редактируем текущее сообщение (на которое пришёл callback)
-        await cb.answer(
-            text="🏠 **Главное меню**\n\nВыберите действие:",
-            keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
-            format="markdown"
-        )
-        # Сохраняем ID отредактированного сообщения
-        _category_messages[user_id] = cb.message.id
+        # 4. Пытаемся отредактировать, если не получается – отправляем новое
+        try:
+            await cb.answer(
+                text="🏠 **Главное меню**\n\nВыберите действие:",
+                keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
+                format="markdown"
+            )
+            _category_messages[user_id] = cb.message.id
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            msg = await cb.send(
+                text="🏠 **Главное меню**\n\nВыберите действие:",
+                keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
+                format="markdown"
+            )
+            _category_messages[user_id] = msg.id
 
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):

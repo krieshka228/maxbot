@@ -31,6 +31,16 @@ _catalog_messages: dict[int, list[str]] = {}   # карточки товаров
 _nav_messages: dict[int, str] = {}             # ID навигационного сообщения
 _category_messages: dict[int, str] = {}         # ID сообщения со списком подкатегорий
 
+async def safe_edit_or_send(cb: aiomax.Callback, text: str, keyboard, format: str = "markdown"):
+    """Пытается отредактировать сообщение, если не получается – отправляет новое."""
+    try:
+        await cb.answer(text=text, keyboard=keyboard, format=format)
+        return cb.message.id
+    except Exception as e:
+        logger.warning(f"Не удалось отредактировать сообщение: {e}, отправляем новое")
+        msg = await cb.send(text=text, keyboard=keyboard, format=format)
+        return msg.id
+
 
 async def delete_catalog_messages(user_id: int, bot: aiomax.Bot, also_delete_message_id: str | None = None):
     """Удаляет все сохранённые карточки товаров для пользователя."""
@@ -75,7 +85,7 @@ def register(bot: aiomax.Bot) -> None:
                 pass
 
         cursor.change_data({})
-        await show_level1_categories(cb)  # здесь cb.answer() отредактирует текущее сообщение
+        await show_level1_categories(cb)
 
     async def show_level1_categories(cb: aiomax.Callback):
         user_id = cb.user.user_id
@@ -95,17 +105,16 @@ def register(bot: aiomax.Bot) -> None:
         kb = KeyboardBuilder()
         if not categories:
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
-            _category_messages[user_id] = cb.message.id
+            msg_id = await safe_edit_or_send(cb, "📭 В каталоге пока нет товаров.", kb)
+            _category_messages[user_id] = msg_id
             return
 
         for cat in categories:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        # Редактируем исходное сообщение
-        await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
-        _category_messages[user_id] = cb.message.id
+        msg_id = await safe_edit_or_send(cb, "**Выберите категорию:**", kb)
+        _category_messages[user_id] = msg_id
 
     # ------------------- Уровень 2: Подкатегории -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:level1:"))
@@ -133,8 +142,7 @@ def register(bot: aiomax.Bot) -> None:
             except Exception:
                 pass
 
-        await show_level2_categories(cb, category)  # здесь cb.answer() отредактирует текущее сообщение
-
+        await show_level2_categories(cb, category)
     async def show_level2_categories(cb: aiomax.Callback, category: str):
         user_id = cb.user.user_id
 
@@ -162,8 +170,8 @@ def register(bot: aiomax.Bot) -> None:
         if not subcategories:
             kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            await cb.answer(text=f"В категории «{category}» пока нет подкатегорий.", keyboard=kb)
-            _category_messages[user_id] = cb.message.id
+            msg_id = await safe_edit_or_send(cb, f"В категории «{category}» пока нет подкатегорий.", kb)
+            _category_messages[user_id] = msg_id
             return
 
         for sub in sorted(subcategories):
@@ -171,9 +179,8 @@ def register(bot: aiomax.Bot) -> None:
         kb.row(CallbackButton("↩️ К категориям", "catalog:show"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        # Редактируем исходное сообщение
-        await cb.answer(text=f"**{category}** — выберите подкатегорию:", keyboard=kb, format="markdown")
-        _category_messages[user_id] = cb.message.id
+        msg_id = await safe_edit_or_send(cb, f"**{category}** — выберите подкатегорию:", kb)
+        _category_messages[user_id] = msg_id
 
     # ------------------- Уровень 3: Товары (с пагинацией) -----------------------
     @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:category:"))
@@ -202,7 +209,7 @@ def register(bot: aiomax.Bot) -> None:
             except Exception:
                 pass
 
-        # Удаляем СТАРОЕ сообщение с подкатегориями – его заменит show_category_page
+        # Удаляем СТАРОЕ сообщение с подкатегориями
         category_msg_id = _category_messages.pop(user_id, None)
         if category_msg_id and category_msg_id != cb.message.id:
             try:
