@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+# Корень проекта в PYTHONPATH, чтобы импортировались модули верхнего
+# уровня (db, config, validators, cache, utils и т.д.) тем же плоским
+# стилем, что используется в main.py/handlers/*.
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
