@@ -14,7 +14,6 @@ from reminders import reminder_loop
 from channel_publisher import auto_publish_loop
 
 # ── Настройка логирования ──────────────────────────────────────────────────
-# ── Настройка логирования ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
