@@ -70,7 +70,7 @@ def register(bot: aiomax.Bot) -> None:
     async def show_level1_categories(cb: aiomax.Callback):
         user_id = cb.user.user_id
 
-        # Удаляем старое навигационное сообщение (пагинацию), если оно было
+        # Удаляем старое навигационное сообщение (пагинацию)
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -85,7 +85,6 @@ def register(bot: aiomax.Bot) -> None:
         kb = KeyboardBuilder()
         if not categories:
             kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
-            # Редактируем исходное сообщение
             await cb.answer(text="📭 В каталоге пока нет товаров.", keyboard=kb)
             _category_messages[user_id] = cb.message.id
             return
@@ -94,7 +93,6 @@ def register(bot: aiomax.Bot) -> None:
             kb.row(CallbackButton(cat, f"catalog:level1:{cat}"))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
-        # Редактируем исходное сообщение
         await cb.answer(text="**Выберите категорию:**", keyboard=kb, format="markdown")
         _category_messages[user_id] = cb.message.id
 
@@ -206,7 +204,7 @@ def register(bot: aiomax.Bot) -> None:
     async def show_category_page(bot, ctx, category: str, subcategory: str, page: int):
         user_id = ctx.user.user_id
 
-        # Удаляем старую навигацию (пагинацию), чтобы в чате не накапливались сообщения с кнопками
+        # Удаляем старую навигацию (пагинацию)
         nav_id = _nav_messages.pop(user_id, None)
         if nav_id:
             try:
@@ -214,13 +212,7 @@ def register(bot: aiomax.Bot) -> None:
             except Exception:
                 pass
 
-        # Удаляем сообщение со списком подкатегорий – оно больше не нужно
-        prev_msg_id = _category_messages.pop(user_id, None)
-        if prev_msg_id is not None:
-            try:
-                await bot.delete_message(prev_msg_id)
-            except Exception:
-                pass
+        # НЕ УДАЛЯЕМ сообщение со списком подкатегорий – оно остаётся для редактирования
 
         async for session in get_session():
             cat_products = await get_active_products_in_category(session, category)
@@ -475,9 +467,12 @@ def register(bot: aiomax.Bot) -> None:
         category = parts[2]
         subcategory = parts[3]
         page = int(parts[4])
+        user_id = cb.user.user_id
+
+        # Удаляем карточки товаров при возврате
+        await delete_catalog_messages(user_id, bot)
 
         async for session in get_session():
-            # Проверяем, есть ли товары в этой подкатегории
             cat_products = await get_active_products_in_category(session, category)
             matched = [
                 p for p in cat_products
@@ -485,7 +480,6 @@ def register(bot: aiomax.Bot) -> None:
             ]
 
             if matched:
-                # Если есть – показываем страницу товаров (с сохранением контекста)
                 cursor.change_data({
                     "catalog_category": category,
                     "catalog_subcategory": subcategory,
@@ -494,7 +488,6 @@ def register(bot: aiomax.Bot) -> None:
                 await show_category_page(bot, cb, category, subcategory, page)
                 return
 
-            # Если товаров в подкатегории нет – проверяем, есть ли другие подкатегории в этой категории
             products = await get_active_products_in_category(session, category)
             subcategories = {}
             for p in products:
@@ -505,10 +498,8 @@ def register(bot: aiomax.Bot) -> None:
                 subcategories[sub] = subcategories.get(sub, 0) + 1
 
             if subcategories:
-                # Если подкатегории есть – показываем их (уровень 2)
                 await show_level2_categories(cb, category)
             else:
-                # Если и подкатегорий нет – показываем категории (уровень 1)
                 await show_level1_categories(cb)
             break
 
