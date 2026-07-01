@@ -328,14 +328,15 @@ def register(bot: aiomax.Bot) -> None:
 
             _catalog_messages[user_id] = new_msgs
 
-            # 2) Навигационное сообщение
+            # 2) Навигационное сообщение (ИСПРАВЛЕНО)
             nav_kb = KeyboardBuilder()
+            nav_row = []
             if page > 0:
-                nav_kb.add(CallbackButton("◀️ Назад", f"catalog:prodpage:{category}:{subcategory}:{page - 1}"))
+                nav_row.append(CallbackButton("◀️ Назад", f"catalog:prodpage:{category}:{subcategory}:{page - 1}"))
             if page < total_pages - 1:
-                nav_kb.add(CallbackButton("Вперёд ▶️", f"catalog:prodpage:{category}:{subcategory}:{page + 1}"))
-            if nav_kb._rows:
-                nav_kb.row()
+                nav_row.append(CallbackButton("Вперёд ▶️", f"catalog:prodpage:{category}:{subcategory}:{page + 1}"))
+            if nav_row:
+                nav_kb.row(*nav_row)
             nav_kb.row(CallbackButton("↩️ К подкатегориям", f"catalog:category:{category}"))
             nav_kb.row(CallbackButton("🏠 Главное меню", "menu:main"))
 
