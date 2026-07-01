@@ -4,10 +4,9 @@ handlers/start.py — /start, on_bot_start, согласие на ПД, прям
 
 import logging
 from datetime import datetime
-from .catalog import delete_catalog_messages
 import aiomax
 from aiomax import fsm
-from utils import parse_quantity, format_cart
+from utils import parse_quantity, format_cart, check_payment_qr
 from config import ADMIN_USER_ID
 from db import get_session, get_or_create_user, get_or_create_draft, add_item_to_order, get_bot_setting
 from keyboards import kb_main_menu, kb_cart_actions, kb_back_to_menu, kb_unavailable
@@ -25,12 +24,6 @@ def _parse_post_link(text: str) -> int | None:
     if m:
         return int(m.group(1))
     return None
-
-
-async def check_payment_qr() -> bool:
-    async for session in get_session():
-        token = await get_bot_setting(session, "payment_qr_token")
-        return bool(token)
 
 
 def register(bot: aiomax.Bot) -> None:
@@ -52,14 +45,12 @@ def register(bot: aiomax.Bot) -> None:
             lines.append(f"• {p.name} — post_id={p.post_id}")
         await ctx.reply("\n".join(lines), format="markdown")
 
-
     @bot.on_command("start")
     async def cmd_start(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
         logger.info("Обработчик /start вызван")
         user_id = ctx.sender.user_id
         has_qr = await check_payment_qr()
         async for session in get_session():
-            # Исправлено: ctx.sender вместо cb.user
             user = await get_or_create_user(
                 session, user_id,
                 full_name=ctx.sender.name,
@@ -88,6 +79,39 @@ def register(bot: aiomax.Bot) -> None:
             keyboard=kb_main_menu(is_admin=False, has_qr=True),
         )
 
+    @bot.on_bot_start()
+    async def on_bot_start(payload: aiomax.BotStartPayload, cursor: fsm.FSMCursor):
+        user_id = payload.user.user_id
+        has_qr = await check_payment_qr()
+        async for session in get_session():
+            user = await get_or_create_user(
+                session, user_id,
+                full_name=payload.user.name,
+                username=getattr(payload.user, "username", None),
+                platform="MAX"
+            )
+        if user_id == ADMIN_USER_ID:
+            cursor.clear()
+            await payload.send(
+                "👋 С возвращением! Выберите действие:",
+                keyboard=kb_main_menu(is_admin=True, has_qr=True),
+            )
+            return
+
+        if not has_qr:
+            cursor.clear()
+            await payload.send(
+                "⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+            )
+            return
+
+        cursor.clear()
+        await payload.send(
+            "👋 С возвращением! Выберите действие:",
+            keyboard=kb_main_menu(is_admin=False, has_qr=True),
+        )
+
     @bot.on_button_callback("menu:main")
     async def back_to_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
@@ -95,7 +119,7 @@ def register(bot: aiomax.Bot) -> None:
 
         logger.info(f"BACK_TO_MENU user_id={user_id}, ADMIN_USER_ID={ADMIN_USER_ID}")
 
-        from handlers.catalog import delete_catalog_messages, _category_messages
+        from handlers.catalog import delete_catalog_messages, _category_messages, safe_edit_or_send
 
         cursor.clear()
 
@@ -116,13 +140,15 @@ def register(bot: aiomax.Bot) -> None:
             )
             return
 
-        # 3. Редактируем текущее сообщение в главное меню
-        await cb.answer(
-            text="🏠 **Главное меню**\n\nВыберите действие:",
-            keyboard=kb_main_menu(is_admin=is_admin, has_qr=has_qr),
+        # 3. Редактируем или отправляем новое сообщение
+        kb = kb_main_menu(is_admin=is_admin, has_qr=has_qr)
+        msg_id = await safe_edit_or_send(
+            cb,
+            "🏠 **Главное меню**\n\nВыберите действие:",
+            kb,
             format="markdown"
         )
-        _category_messages[user_id] = cb.message.id
+        _category_messages[user_id] = msg_id
 
     @bot.on_command("myid")
     async def cmd_myid(ctx: aiomax.CommandContext, cursor: fsm.FSMCursor):
