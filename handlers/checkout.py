@@ -110,13 +110,12 @@ def register(bot: aiomax.Bot) -> None:
                 logger.warning(f"Не удалось уведомить администратора об отмене: {e}")
 
             order_info = format_order_for_admin(order)
-            text = f"❌ **Заказ #{order_id} отменён.**\n\n{order_info}"
+            cancel_text = f"❌ **Заказ #{order_id} отменён.**\n\n{order_info}"
             await cb.send(
-                text,
+                cancel_text,
                 keyboard=kb_back_to_menu(),
                 format="markdown"
             )
-
     # ── Администратор: подтверждение оплаты ──────────────────────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:pay_ok:"))
     async def admin_pay_ok(cb: aiomax.Callback, cursor: fsm.FSMCursor):
