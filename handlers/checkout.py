@@ -62,36 +62,29 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("❌ Заказ не найден.")
                 return
 
-            # Отмена доступна только для заказов в статусе "pending",
-            # созданных менее 5 минут назад
-            if order.status != OrderStatus.pending:
+            # Разрешаем отмену для статусов pending и paid (до подтверждения)
+            if order.status not in (OrderStatus.pending, OrderStatus.paid):
                 await cb.send(
-                    "⚠️ Заказ уже оплачен или подтверждён, отмена невозможна.",
+                    f"⚠️ Заказ уже подтверждён (статус: {order.status.value}), отмена невозможна.",
                     keyboard=kb_back_to_menu(),
                 )
                 return
 
-            created_at = order.created_at
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
-            if age_seconds >= 300:
-                await cb.send(
-                    "⚠️ С момента оформления заказа прошло более 5 минут. Отмена невозможна.",
-                    keyboard=kb_back_to_menu(),
-                )
-                return
-
-            # 1. Атомарно меняем статус на cancelled, если он ещё pending
+            # 1. Атомарно меняем статус на cancelled, если он ещё не подтверждён
             result = await session.execute(
-                text("UPDATE orders SET status = :new_status WHERE id = :id AND status = :pending_status"),
-                {"new_status": OrderStatus.cancelled, "id": order_id, "pending_status": OrderStatus.pending}
+                text("UPDATE orders SET status = :new_status WHERE id = :id AND status IN (:s1, :s2)"),
+                {
+                    "new_status": OrderStatus.cancelled,
+                    "id": order_id,
+                    "s1": OrderStatus.pending,
+                    "s2": OrderStatus.paid,
+                }
             )
             if result.rowcount == 0:
                 await cb.send("❌ Этот заказ уже отменён или его статус изменился.")
                 return
 
-            # 2. Возвращаем остатки и восстанавливаем видимость товара в каталоге
+            # 2. Возвращаем остатки (если они были списаны)
             for item in order.items:
                 if item.product and item.product.stock is not None:
                     await session.execute(
@@ -106,7 +99,7 @@ def register(bot: aiomax.Bot) -> None:
             await session.commit()
             invalidate_catalog_cache()
 
-            # Уведомляем администратора об отмене
+            # Уведомляем администратора
             fio = order.full_name or (order.user.full_name if order.user else None)
             admin_text = f"❌ Клиент отменил заказ #{order_id} на {order.total_amount:.0f} ₽."
             if fio:
@@ -116,7 +109,6 @@ def register(bot: aiomax.Bot) -> None:
             except Exception as e:
                 logger.warning(f"Не удалось уведомить администратора об отмене: {e}")
 
-            
             order_info = format_order_for_admin(order)
             text = f"❌ **Заказ #{order_id} отменён.**\n\n{order_info}"
             await cb.send(

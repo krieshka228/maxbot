@@ -3,7 +3,7 @@ handlers/orders.py — история заказов и контакт с адм
 
 Реализованы:
   - Пагинация (5 заказов на страницу)
-  - Кнопка «Отменить» только для заказов моложе 5 минут в статусе pending
+  - Кнопка «Отменить» для заказов в статусе pending или paid (без ограничения по времени)
   - Кнопка «Дополнить данные» для confirmed-заказов без телефона/адреса
   - Контакт с администратором
 """
@@ -24,7 +24,6 @@ from utils import check_payment_qr
 logger = logging.getLogger(__name__)
 
 ORDERS_PER_PAGE = 5
-CANCEL_TIMEOUT_SECONDS = 300  # 5 минут
 
 STATUS_LABEL = {
     "pending":   "⏳ Ожидает оплаты",
@@ -78,17 +77,16 @@ async def _show_orders_page(cb: aiomax.Callback, user_id: int, page: int):
 
     kb = KeyboardBuilder()
     for order in orders:
-        # Кнопка "Отменить" для pending (до 5 мин)
-        if order.status == OrderStatus.pending:
-            created_at = order.created_at.replace(tzinfo=timezone.utc)
-            age = (now - created_at).total_seconds()
-            if age < CANCEL_TIMEOUT_SECONDS:
-                kb.add(CallbackButton(f"❌ Отменить #{order.id}", f"payment:cancel:{order.id}", intent='default'))
-                kb.row()
-            if qr_token:
+        # --- ИСПРАВЛЕНО: отмена для pending и paid (без ограничения по времени) ---
+        if order.status in (OrderStatus.pending, OrderStatus.paid):
+            kb.add(CallbackButton(f"❌ Отменить #{order.id}", f"payment:cancel:{order.id}", intent='default'))
+            kb.row()
+            # Кнопка оплаты только для pending (если есть QR)
+            if order.status == OrderStatus.pending and qr_token:
                 kb.add(CallbackButton(f"💳 Оплатить #{order.id}", f"payment:receipt:{order.id}", intent='default'))
                 kb.row()
-        # Новая кнопка "Изменить заказ" для всех, кроме отменённых
+
+        # Кнопка "Изменить заказ" для всех, кроме отменённых
         if order.status != OrderStatus.cancelled:
             kb.add(CallbackButton(f"✏️ Изменить заказ #{order.id}", f"orders:edit:{order.id}", intent='default'))
             kb.row()
@@ -125,6 +123,7 @@ def register(bot: aiomax.Bot) -> None:
         cursor.change_data({"order_id": order_id, "editing": True})
         cursor.change_state(UserStates.AWAITING_PHONE)
         await cb.send("📱 Введите ваш номер телефона для связи:", keyboard=kb_back_to_menu())
+
     @bot.on_button_callback("orders:list")
     async def orders_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         user_id = cb.user.user_id
