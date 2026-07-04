@@ -69,7 +69,7 @@ async def safe_edit_or_send(cb: aiomax.Callback, text: str, keyboard, format: st
     except Exception as e:
         logger.warning(f"Не удалось отредактировать сообщение: {e}, отправляем новое")
         try:
-            await bot.delete_message(cb.message.id)
+            await cb.bot.delete_message(cb.message.id)   # ← заменили bot на cb.bot
         except Exception:
             pass
         msg = await cb.send(text=text, keyboard=keyboard, format=format)
@@ -288,7 +288,7 @@ def register(bot: aiomax.Bot) -> None:
             all_products = await get_active_products_in_category(session, category)
             products = [
                 p for p in all_products
-                if p.name == subcategory or p.name.startswith(subcategory + ",")
+                if _subcategory_of(p) == subcategory
             ]
 
             if not products:
