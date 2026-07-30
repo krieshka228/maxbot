@@ -23,7 +23,7 @@ def kb_main_menu(is_admin: bool = False, has_qr: bool = True) -> aiomax.buttons.
         kb.row(buttons.CallbackButton("🔍 Поиск по названию", "search:name", intent='default'))
         kb.row(buttons.CallbackButton("🛒 Моя корзина", "cart:view", intent='default'))
         kb.row(buttons.CallbackButton("📋 Мои заказы", "orders:list", intent='default'))
-    # Обычная кнопка, которая вызовет отправку упоминания
+        kb.row(buttons.CallbackButton("💎 Бонусы", "bonus:menu", intent='default'))   # <-- новая кнопка
     kb.row(buttons.CallbackButton("✉️ Написать администратору", "contact:admin", intent='default'))
     if is_admin:
         kb.row(buttons.CallbackButton("⚙️ Админ-меню", "admin:menu", intent='default'))
@@ -79,13 +79,13 @@ def kb_admin_menu(auto_publish_enabled: bool = False) -> KeyboardBuilder:
     kb.add(CallbackButton("📊 Заказы за месяц", "admin:excel:summary", intent='default'))
     kb.row(CallbackButton("👥 База клиентов", "admin:excel:clients", intent='default'))
     kb.row(CallbackButton("💳 Реквизиты", "admin:payment_qr", intent='default'))
-    kb.row(CallbackButton("📦 Изменить остаток", "admin:set_stock_list", intent='default'))
     kb.row(CallbackButton("🗑️ Удалить по артикулам", "admin:delete_by_articles", intent='default'))
-    # Новая кнопка для перехода в подменю автопубликации
     kb.row(CallbackButton("📤 Автовыкладывание", "admin:auto_publish_menu", intent='default'))
+    kb.row(CallbackButton("📦 Управление товарами", "admin:manage_products", intent='default'))
+    kb.row(CallbackButton("💎 Управление бонусами", "admin:bonus_menu", intent='default'))
+    kb.row(CallbackButton("🎫 Промокоды", "admin:promo_menu", intent='default'))
     kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
     return kb
-
 def kb_auto_publish_menu(auto_publish_enabled: bool) -> KeyboardBuilder:
     kb = KeyboardBuilder()
     # Статус (просто текст, не callback)

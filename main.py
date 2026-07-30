@@ -5,7 +5,7 @@ import os
 os.environ.setdefault('NO_PROXY', 'platform-api.max.ru')
 os.environ['NO_PROXY'] = '*'
 import aiohttp
-
+from handlers import bonuses
 import aiomax
 from aiomax.bot import Bot
 from config import BOT_TOKEN
@@ -135,6 +135,7 @@ async def main():
     patch_bot_antiflood(bot)
 
     start.register(bot)
+    bonuses.register(bot)
     cart.register(bot)
     checkout.register(bot)
     admin.register(bot)

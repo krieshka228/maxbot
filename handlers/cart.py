@@ -14,6 +14,8 @@ from db import (
     recalculate_total,
     OrderStatus,
     Product,
+    User,
+    get_order_with_items
 )
 from cache import invalidate_catalog_cache
 from keyboards import (
@@ -30,7 +32,32 @@ logger = logging.getLogger(__name__)
 
 
 def register(bot: aiomax.Bot) -> None:
+    @bot.on_message(filters.state("order_bonus_input"))
+    async def handle_order_bonus_input(message: aiomax.Message, cursor: fsm.FSMCursor):
+        data = cursor.get_data()
+        order_id = data["order_id"]
+        bonus_balance = data["bonus_balance"]
+        order_total = data["order_total"]
+        user_id = message.sender.user_id
 
+        try:
+            bonus_amount = int(message.body.text.strip())
+            if bonus_amount < 0:
+                raise ValueError
+        except ValueError:
+            await message.reply("❌ Введите целое неотрицательное число.", keyboard=kb_back_to_menu())
+            return
+
+        max_bonus = min(bonus_balance, int(order_total * 0.2))
+        if bonus_amount > max_bonus:
+            await message.reply(
+                f"❌ Вы можете списать максимум {max_bonus} бонусов.\nВведите сумму до {max_bonus}:",
+                keyboard=kb_back_to_menu()
+            )
+            return
+
+        cursor.clear()
+        await _finalize_order(message, order_id, user_id, bonus_amount)
     # ── Просмотр корзины ──────────────────────────────────────────────────────
     @bot.on_button_callback("cart:view")
     async def view_cart(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -200,13 +227,7 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.answer(notification="Позиция не найдена.")
                 return
 
-            product = item.product
             new_qty = item.quantity + delta
-
-            if product and product.stock is not None and new_qty > product.stock:
-                await cb.answer(notification=f"❌ Доступно только {product.stock} шт.")
-                return
-
             if new_qty <= 0:
                 order.items.remove(item)
                 await session.delete(item)
@@ -276,15 +297,6 @@ def register(bot: aiomax.Bot) -> None:
                 cursor.clear()
                 return
 
-            product = item.product
-            if product and product.stock is not None and new_qty > product.stock:
-                await message.reply(
-                    f"❌ Недостаточно товара. В наличии: {product.stock} шт.",
-                    keyboard=kb_back_to_menu()
-                )
-                cursor.clear()
-                return
-
             item.quantity = new_qty
             await recalculate_total(session, order)
             await session.commit()
@@ -298,6 +310,55 @@ def register(bot: aiomax.Bot) -> None:
         )
         cursor.clear()
 
+    async def _finalize_order(ctx, order_id, user_id, bonus_amount):
+        """Списывает бонусы, меняет статус и отправляет QR с информацией."""
+        async for session in get_session():
+            order = await get_order_with_items(session, order_id)
+            if not order or order.user_id != user_id:
+                await ctx.send("❌ Заказ не найден.")
+                return
+
+            if order.status != OrderStatus.draft:
+                await ctx.send("❌ Заказ уже нельзя изменить.")
+                return
+
+            # Применяем бонусы
+            if bonus_amount > 0:
+                user = await session.get(User, user_id)
+                user.bonus_balance -= bonus_amount
+                order.bonus_used = bonus_amount
+                order.total_amount -= bonus_amount
+
+            order.status = OrderStatus.pending
+            await session.commit()
+            invalidate_catalog_cache()
+
+            # QR-код
+            qr_token = await get_bot_setting(session, "payment_qr_token")
+            attachments = []
+            if qr_token and not qr_token.startswith("AgACAgI"):
+                attachments.append(aiomax.PhotoAttachment(token=qr_token))
+
+            cart_text = format_cart(order)
+            bonus_text = f"\n💎 Списано бонусов: {bonus_amount}" if bonus_amount > 0 else ""
+            msg_text = (
+                f"✅ **Заказ #{order.id} оформлен!**\n\n"
+                f"{cart_text}"
+                f"{bonus_text}\n\n"
+                "После оплаты нажмите кнопку ниже и пришлите фото чека."
+            )
+
+            kb = KeyboardBuilder()
+            kb.add(CallbackButton("💳 Я оплатил — отправить чек", f"payment:receipt:{order.id}", intent='default'))
+            kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}", intent='default'))
+            kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
+
+            await ctx.send(
+                msg_text,
+                keyboard=kb,
+                attachments=attachments if attachments else None,
+                format="markdown"
+            )
     # ── Оформить заказ (атомарное резервирование + проверка QR) ───────────────
     @bot.on_button_callback(lambda cb: cb.payload.startswith("cart:checkout:"))
     async def cart_checkout(cb: aiomax.Callback, cursor: fsm.FSMCursor):
@@ -338,70 +399,25 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("🛒 Корзина пуста.")
                 return
 
-            for item in order.items:
-                product = item.product
-                if product and product.stock is not None and item.quantity > product.stock:
-                    await cb.send(
-                        f"❌ Товар «{product.name}» доступен в количестве {product.stock} шт. "
-                        f"У вас в корзине {item.quantity} шт. Пожалуйста, измените количество.",
-                        keyboard=kb_cart_actions(order.id),
-                        format="markdown"
-                    )
-                    return
-
-            for item in order.items:
-                product = item.product
-                if product and product.stock is not None:
-                    result = await session.execute(
-                        text("UPDATE products SET stock = stock - :qty WHERE id = :id AND stock >= :qty"),
-                        {"qty": item.quantity, "id": product.id}
-                    )
-                    if result.rowcount == 0:
-                        await session.rollback()
-                        await cb.send(
-                            f"❌ Товар «{product.name}» только что закончился.",
-                            keyboard=kb_cart_actions(order.id),
-                            format="markdown"
-                        )
-                        return
-                    new_stock = (await session.execute(
-                        select(Product.stock).where(Product.id == product.id)
-                    )).scalar()
-                    product.stock = new_stock
-                    product.is_active = new_stock > 0
-                    product.in_stock = new_stock > 0
-
-            order.status = OrderStatus.pending
-            await session.commit()
-            invalidate_catalog_cache()
-
-        attachments = []
-        async for session in get_session():
-            qr_token = await get_bot_setting(session, "payment_qr_token")
-        if qr_token:
-            if not qr_token.startswith("AgACAgI"):
-                attachments.append(aiomax.PhotoAttachment(token=qr_token))
-            else:
-                logger.warning(
-                    f"QR-код содержит Telegram file_id, а не Max-токен. "
-                    f"Пропускаем вложение. Токен: {qr_token[:20]}..."
+            # --- Проверка бонусного баланса ---
+            user = await session.get(User, user_id)
+            bonus_balance = user.bonus_balance if user else 0
+            if bonus_balance > 0 and order.total_amount > 0:
+                cursor.change_state("order_bonus_input")
+                cursor.change_data({
+                    "order_id": order.id,
+                    "bonus_balance": bonus_balance,
+                    "order_total": order.total_amount
+                })
+                max_bonus = min(bonus_balance, int(order.total_amount * 0.2))
+                await cb.send(
+                    f"💎 **У вас {bonus_balance} бонусов!**\n\n"
+                    f"Вы можете оплатить до 20% стоимости заказа.\n"
+                    f"💰 Максимум: {max_bonus} бонусов.\n\n"
+                    f"Введите сумму бонусов для списания (или 0, чтобы не использовать):",
+                    keyboard=kb_back_to_menu()
                 )
+                return
 
-        cart_text = format_cart(order)
-        msg_text = (
-            f"✅ **Заказ #{order.id} оформлен!**\n\n"
-            f"{cart_text}\n\n"
-            "После оплаты нажмите кнопку ниже и пришлите фото чека."
-        )
-
-        kb = KeyboardBuilder()
-        kb.add(CallbackButton("💳 Я оплатил — отправить чек", f"payment:receipt:{order.id}", intent='default'))
-        kb.row(CallbackButton("❌ Отменить заказ", f"payment:cancel:{order.id}", intent='default'))
-        kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
-
-        await cb.send(
-            msg_text,
-            keyboard=kb,
-            attachments=attachments if attachments else None,
-            format="markdown"
-        )
+            # Бонусов нет – оформляем без них
+            await _finalize_order(cb, order.id, user_id, 0)

@@ -7,6 +7,16 @@ logger = logging.getLogger(__name__)
 
 _QTY_RE = re.compile(r"^\s*(\d+)\s*(?:шт\.?|штук[аи]?|ед\.?)?\s*$", re.IGNORECASE)
 
+from datetime import datetime
+
+def parse_datetime(text: str) -> datetime | None:
+    """Разбирает дату в форматах ДД-ММ-ГГГГ или ГГГГ-ММ-ДД."""
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
 
 def parse_quantity(text: str) -> Optional[int]:
     """Возвращает целое число из строки (допускает суффикс «шт.»/«ед.»),
@@ -130,15 +140,10 @@ def format_order_for_admin(order) -> str:
 # ----- ФУНКЦИИ ДЛЯ ФОРМИРОВАНИЯ ТЕКСТА ТОВАРОВ -----
 
 def build_catalog_card_text(product) -> str:
-    """
-    Текст карточки товара для КАТАЛОГА (стиль Telegram-бота).
-    Выводится название, артикул, остаток, цена.
-    """
     lines = [product.name]
     if product.article:
         lines.append(f"▫️ Артикул: {product.article}")
-    if product.stock is not None:
-        lines.append(f"▫️ На складе: {product.stock} шт.")
+    # больше не показываем stock
     lines.append(f"▫️ Цена: {product.price:.0f} ₽")
     return "\n".join(lines)
 

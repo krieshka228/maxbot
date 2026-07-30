@@ -79,6 +79,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(128))
     full_name: Mapped[str | None] = mapped_column(String(256))
+    bonus_balance: Mapped[int] = mapped_column(Integer, default=0)
     phone: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
     platform: Mapped[str | None] = mapped_column(String(32), nullable=True)  # "MAX" или "Telegram"
@@ -116,6 +117,7 @@ class Order(Base):
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.draft)
     delivery_address: Mapped[str | None] = mapped_column(Text)
     contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bonus_used: Mapped[int] = mapped_column(Integer, default=0)
     full_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     receipt_file_id: Mapped[str | None] = mapped_column(String(512))
     total_amount: Mapped[float] = mapped_column(Float, default=0.0)
@@ -162,6 +164,25 @@ class Comment(Base):
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+class PromoCode(Base):
+    __tablename__ = "promo_codes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    bonus_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_by: Mapped[int] = mapped_column(BigInteger, nullable=True)
+
+class PromoUsage(Base):
+    __tablename__ = "promo_usages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    promo_code: Mapped[str] = mapped_column(String(32), ForeignKey("promo_codes.code"), index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    used_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
 
 # Индексы под фильтрацию каталога (идемпотентно, безопасно на каждом старте).
 _CATALOG_INDEXES = (
@@ -185,6 +206,13 @@ def _ensure_added_columns(conn):
         cols = {c["name"] for c in insp.get_columns("users")}
         if "platform" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN platform TEXT"))
+        # новые поля для бонусной системы
+        if "bonus_balance" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN bonus_balance INTEGER DEFAULT 0"))
+    if "orders" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("orders")}
+        if "bonus_used" not in cols:
+            conn.execute(text("ALTER TABLE orders ADD COLUMN bonus_used INTEGER DEFAULT 0"))
 
 
 async def init_db() -> None:
@@ -329,9 +357,11 @@ async def get_products_without_max_post(session: AsyncSession) -> list[Product]:
     return products
 
 
-async def mark_product_published(session, product, post_id):
-    product.max_post_id = post_id
-    await session.commit()
+async def mark_product_published(session, product_id: int, post_id: str) -> None:
+    product = await session.get(Product, product_id)
+    if product:
+        product.max_post_id = post_id
+        await session.commit()
 
 
 async def upsert_product(

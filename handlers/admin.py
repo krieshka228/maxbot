@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import asyncio
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
+from db import PromoCode, PromoUsage
+from utils import parse_datetime
 import aiohttp
 import aiomax
 from aiomax import fsm, filters
@@ -33,12 +35,252 @@ from cache import invalidate_catalog_cache
 from .catalog import delete_catalog_messages
 from states import UserStates
 from channel_publisher import publish_product_to_max
+from sqlalchemy import delete
+from db import OrderItem
+
+
 logger = logging.getLogger(__name__)
 
-ITEMS_PER_PAGE = 5
-CATEGORIES_PER_PAGE = 5
+
+PRODUCTS_PER_PAGE = 5
+CATEGORIES_PER_PAGE = 8
+
+
+
+def _subcategory_of(name: str) -> str:
+    return name.split(",")[0].strip() if "," in name else name.strip()
+
 
 def register(bot: aiomax.Bot) -> None:
+    # ================== УПРАВЛЕНИЕ ТОВАРАМИ ==================
+
+    @bot.on_button_callback("admin:manage_products")
+    async def manage_products(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает список категорий для управления товарами."""
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        async for session in get_session():
+            categories = (await session.execute(
+                select(Product.category).where(Product.category != None).distinct().order_by(Product.category)
+            )).scalars().all()
+
+        if not categories:
+            await cb.answer(text="📭 В базе нет товаров.", keyboard=kb_back_to_menu())
+            return
+
+        kb = KeyboardBuilder()
+        for cat in categories:
+            kb.row(CallbackButton(f"📂 {cat}", f"admin:prod_cat:{cat}"))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        await cb.answer(text="📦 **Управление товарами**\nВыберите категорию:", keyboard=kb, format="markdown")
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_cat:"))
+    async def manage_products_category(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает подкатегории выбранной категории."""
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        category = cb.payload.split(":", 2)[2]
+        cursor.change_data({"admin_current_cat": category, "admin_current_sub": None})
+
+        async for session in get_session():
+            products = (await session.execute(select(Product).where(Product.category == category))).scalars().all()
+
+        subcategories = {}
+        for p in products:
+            sub = _subcategory_of(p.name)
+            subcategories[sub] = subcategories.get(sub, 0) + 1
+
+        if not subcategories:
+            kb = KeyboardBuilder()
+            kb.row(CallbackButton("↩️ К категориям", "admin:manage_products"))
+            kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+            await cb.answer(text=f"В категории «{category}» нет товаров.", keyboard=kb)
+            return
+
+        kb = KeyboardBuilder()
+        for sub in sorted(subcategories):
+            kb.row(CallbackButton(f"📱 {sub} ({subcategories[sub]})", f"admin:prod_sub:{category}:{sub}"))
+        kb.row(CallbackButton("↩️ К категориям", "admin:manage_products"))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+        await cb.answer(
+            text=f"📦 **Управление товарами** — {category}\nВыберите подкатегорию:",
+            keyboard=kb,
+            format="markdown"
+        )
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_sub:"))
+    async def manage_products_subcategory(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Показывает товары в выбранной подкатегории."""
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        parts = cb.payload.split(":")
+        category = parts[2]
+        subcategory = parts[3]
+        cursor.change_data({"admin_current_cat": category, "admin_current_sub": subcategory, "admin_current_page": 0})
+        await show_manage_products_page(cb, cursor, page=0)
+
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_page:"))
+    async def manage_products_page_handler(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Обработчик пагинации в управлении товарами."""
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        page = int(cb.payload.split(":")[-1])
+        await show_manage_products_page(cb, cursor, page=page)
+
+    async def show_manage_products_page(cb: aiomax.Callback, cursor: fsm.FSMCursor, page: int = 0):
+        data = cursor.get_data() or {}
+        category = data.get("admin_current_cat")
+        subcategory = data.get("admin_current_sub")
+
+        if not category:
+            await cb.answer("Сначала выберите категорию.", keyboard=kb_back_to_menu())
+            return
+
+        # ★ сохраняем контекст для последующих действий (скрыть/показать/удалить)
+        cursor.change_data({
+            "admin_current_cat": category,
+            "admin_current_sub": subcategory,
+            "admin_current_page": page
+        })
+
+        async for session in get_session():
+            stmt = select(Product).where(Product.category == category)
+            if subcategory:
+                stmt = stmt.where(
+                    (Product.name == subcategory) |
+                    (Product.name.startswith(subcategory + ',')) |
+                    (Product.name.startswith(subcategory + ' ,'))
+                )
+            total = (await session.execute(select(func.count()).select_from(stmt.subquery()))).scalar()
+            products = (await session.execute(
+                stmt.order_by(Product.id).offset(page * PRODUCTS_PER_PAGE).limit(PRODUCTS_PER_PAGE)
+            )).scalars().all()
+
+        if not products:
+            kb = KeyboardBuilder()
+            if subcategory:
+                kb.row(CallbackButton("↩️ К подкатегориям", f"admin:prod_cat:{category}"))
+            else:
+                kb.row(CallbackButton("↩️ К категориям", "admin:manage_products"))
+            kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+            await cb.answer(text=f"В этой категории нет товаров.", keyboard=kb)
+            return
+
+        total_pages = (total - 1) // PRODUCTS_PER_PAGE + 1
+        title = f"{category} / {subcategory}" if subcategory else category
+        lines = [f"📦 **Управление товарами** — {title} (стр. {page + 1}/{total_pages})\n"]
+        kb = KeyboardBuilder()
+
+        for p in products:
+            status = "🟢 активен" if p.is_active else "🔴 скрыт"
+            lines.append(f"• {p.name} — {status}")
+
+            row = [
+                CallbackButton("🗑 Удалить", f"admin:prod_delete:{p.id}", intent='negative'),
+            ]
+            if p.is_active:
+                row.append(CallbackButton("🙈 Скрыть", f"admin:prod_hide:{p.id}", intent='default'))
+            else:
+                row.append(CallbackButton("👁 Показать", f"admin:prod_show:{p.id}", intent='default'))
+            kb.row(*row)
+
+        # Пагинация
+        nav = []
+        if page > 0:
+            nav.append(CallbackButton("← Назад", f"admin:prod_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav.append(CallbackButton("Вперёд →", f"admin:prod_page:{page + 1}"))
+        if nav:
+            kb.row(*nav)
+
+        # Возврат
+        if subcategory:
+            kb.row(CallbackButton("↩️ К подкатегориям", f"admin:prod_cat:{category}"))
+        else:
+            kb.row(CallbackButton("↩️ К категориям", "admin:manage_products"))
+        kb.row(CallbackButton("⚙️ Админ-меню", "admin:menu"))
+
+        await cb.answer(text="\n".join(lines), keyboard=kb, format="markdown")
+
+    # Удаление товара
+    # Удаление товара
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_delete:"))
+    async def product_delete(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        product_id = int(cb.payload.split(":")[-1])
+        data = cursor.get_data() or {}
+        page = data.get("admin_current_page", 0)
+
+        async for session in get_session():
+            product = await session.get(Product, product_id)
+            if not product:
+                await cb.answer(notification="❌ Товар не найден.")
+                return
+            await session.execute(delete(OrderItem).where(OrderItem.product_id == product_id))
+            await session.delete(product)
+            await session.commit()
+            invalidate_catalog_cache()  # <-- сброс кэша
+            logger.info(f"admin deleted product id={product_id} name={product.name}")
+
+        await show_manage_products_page(cb, cursor, page=page)
+
+    # Скрыть товар
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_hide:"))
+    async def product_hide(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        product_id = int(cb.payload.split(":")[-1])
+        data = cursor.get_data() or {}
+        page = data.get("admin_current_page", 0)
+
+        async for session in get_session():
+            product = await session.get(Product, product_id)
+            if not product:
+                await cb.answer(notification="❌ Товар не найден.")
+                return
+            product.is_active = False
+            await session.commit()
+            invalidate_catalog_cache()  # <-- сброс кэша
+            logger.info(f"admin hid product id={product_id} name={product.name}")
+
+        await show_manage_products_page(cb, cursor, page=page)
+
+    # Показать товар
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("admin:prod_show:"))
+    async def product_show(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="Нет доступа.")
+            return
+
+        product_id = int(cb.payload.split(":")[-1])
+        data = cursor.get_data() or {}
+        page = data.get("admin_current_page", 0)
+
+        async for session in get_session():
+            product = await session.get(Product, product_id)
+            if not product:
+                await cb.answer(notification="❌ Товар не найден.")
+                return
+            product.is_active = True
+            await session.commit()
+            invalidate_catalog_cache()  # <-- сброс кэша
+            logger.info(f"admin showed product id={product_id} name={product.name}")
+
+        await show_manage_products_page(cb, cursor, page=page)
+
     @bot.on_button_callback("admin:publish_all")
     async def admin_publish_all(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         """Принудительная публикация всех неопубликованных товаров."""
@@ -104,6 +346,297 @@ def register(bot: aiomax.Bot) -> None:
             format="markdown"
         )
 
+    # ------------------- УПРАВЛЕНИЕ БОНУСАМИ -----------------------
+    @bot.on_button_callback("admin:bonus_menu")
+    async def admin_bonus_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        kb = KeyboardBuilder()
+        kb.row(CallbackButton("👤 Начислить бонусы пользователю", "admin:bonus_add_user"))
+        kb.row(CallbackButton("👥 Начислить бонусы всем", "admin:bonus_add_all"))
+        kb.row(CallbackButton("👀 Проверить баланс", "admin:bonus_check"))
+        kb.row(CallbackButton("↩️ Назад", "admin:menu"))
+        await cb.answer(text="💎 **Управление бонусами**", keyboard=kb, format="markdown")
+
+    # --- начисление конкретному пользователю (по user_id) ---
+    @bot.on_button_callback("admin:bonus_add_user")
+    async def admin_bonus_add_user_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state("admin_bonus_add_user")
+        await cb.answer(notification=" ")
+        await cb.send(
+            "✏️ Введите user_id и сумму бонусов через пробел.\nПример: `123456 500`",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
+
+    @bot.on_message(filters.state("admin_bonus_add_user"))
+    async def handle_admin_bonus_add_user(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        parts = message.body.text.strip().split()
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].lstrip('-').isdigit():
+            await message.reply("❌ Формат: <user_id> <сумма>. Пример: 123456 500", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+        user_id = int(parts[0])
+        amount = int(parts[1])
+        if amount <= 0:
+            await message.reply("❌ Сумма должна быть положительной.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        async for session in get_session():
+            user = await session.get(User, user_id)
+            if not user:
+                await message.reply(f"❌ Пользователь с ID {user_id} не найден.", keyboard=kb_admin_menu())
+                cursor.clear()
+                return
+            user.bonus_balance = (user.bonus_balance or 0) + amount
+            await session.commit()
+            # уведомление пользователю (если бот может ему написать)
+            try:
+                await bot.send_message(
+                    user_id=user_id,
+                    text=f"🎉 Вам начислено {amount} бонусов!\n💰 Ваш баланс: {user.bonus_balance} бонусов.",
+                    format="markdown"
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+        cursor.clear()
+        await message.reply(
+            f"✅ Пользователю {user_id} начислено {amount} бонусов.\n💰 Новый баланс: {user.bonus_balance} бонусов.",
+            keyboard=kb_admin_menu()
+        )
+
+    # --- начисление всем ---
+    @bot.on_button_callback("admin:bonus_add_all")
+    async def admin_bonus_add_all_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state("admin_bonus_add_all")
+        await cb.answer(notification=" ")
+        await cb.send(
+            "✏️ Введите сумму бонусов для начисления всем пользователям:\nПример: 500",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
+
+    @bot.on_message(filters.state("admin_bonus_add_all"))
+    async def handle_admin_bonus_add_all(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        try:
+            amount = int(message.body.text.strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await message.reply("❌ Введите положительное целое число.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        count = 0
+        async for session in get_session():
+            users = await get_all_users(session)
+            for user in users:
+                if user.id != ADMIN_USER_ID:
+                    user.bonus_balance = (user.bonus_balance or 0) + amount
+                    count += 1
+                    try:
+                        await bot.send_message(
+                            user_id=user.id,
+                            text=f"🎉 Вам начислено {amount} бонусов!\n💰 Ваш баланс: {user.bonus_balance} бонусов.",
+                            format="markdown"
+                        )
+                    except Exception:
+                        pass
+            await session.commit()
+        cursor.clear()
+        await message.reply(f"✅ {count} пользователям начислено по {amount} бонусов.", keyboard=kb_admin_menu())
+
+    # --- проверка баланса ---
+    @bot.on_button_callback("admin:bonus_check")
+    async def admin_bonus_check_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state("admin_bonus_check")
+        await cb.answer(notification=" ")
+        await cb.send(
+            "✏️ Введите user_id пользователя для проверки баланса:",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
+
+    @bot.on_message(filters.state("admin_bonus_check"))
+    async def handle_admin_bonus_check(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        try:
+            user_id = int(message.body.text.strip())
+        except ValueError:
+            await message.reply("❌ Введите корректный user_id.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        async for session in get_session():
+            user = await session.get(User, user_id)
+            if not user:
+                await message.reply(f"❌ Пользователь с ID {user_id} не найден.", keyboard=kb_admin_menu())
+                cursor.clear()
+                return
+            balance = user.bonus_balance or 0
+        cursor.clear()
+        await message.reply(
+            f"💎 Баланс пользователя {user_id}: {balance} бонусов.",
+            keyboard=kb_admin_menu()
+        )
+
+    # ------------------- УПРАВЛЕНИЕ ПРОМОКОДАМИ -----------------------
+    @bot.on_button_callback("admin:promo_menu")
+    async def admin_promo_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        kb = KeyboardBuilder()
+        kb.row(CallbackButton("➕ Создать промокод", "admin:promo_create"))
+        kb.row(CallbackButton("📋 Список промокодов", "admin:promo_list"))
+        kb.row(CallbackButton("🗑 Удалить промокод", "admin:promo_delete"))
+        kb.row(CallbackButton("↩️ Назад", "admin:bonus_menu"))
+        await cb.answer(text="🎫 **Управление промокодами**", keyboard=kb, format="markdown")
+
+    # --- создание промокода ---
+    @bot.on_button_callback("admin:promo_create")
+    async def admin_promo_create_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state("admin_promo_create")
+        await cb.answer(notification=" ")
+        await cb.send(
+            "✏️ Введите данные промокода в формате:\n"
+            "<code>КОД</code> <бонусы> [лимит] [дата_окончания]\n\n"
+            "Примеры:\n"
+            "<code>NEWYEAR 500 100 31-12-2026</code> — 500 бонусов, 100 активаций, до 31.12.2026\n"
+            "<code>WELCOME 200</code> — безлимитный и бессрочный",
+            keyboard=kb_back_to_menu(),
+            format="markdown"
+        )
+
+    @bot.on_message(filters.state("admin_promo_create"))
+    async def handle_admin_promo_create(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        parts = message.body.text.strip().split()
+        if len(parts) < 2:
+            await message.reply("❌ Укажите код и количество бонусов.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        code = parts[0].upper()
+        try:
+            bonus = int(parts[1])
+        except ValueError:
+            await message.reply("❌ Неверное количество бонусов.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        max_uses = None
+        expires_at = None
+        for part in parts[2:]:
+            # пробуем как число
+            try:
+                max_uses = int(part)
+                continue
+            except ValueError:
+                pass
+            # пробуем как дату
+            dt = parse_datetime(part)
+            if dt:
+                expires_at = dt
+                continue
+            # если не подошло
+            await message.reply(f"❌ Не удалось распознать параметр '{part}'.", keyboard=kb_admin_menu())
+            cursor.clear()
+            return
+
+        async for session in get_session():
+            exists = (await session.execute(select(PromoCode).where(PromoCode.code == code))).scalar_one_or_none()
+            if exists:
+                await message.reply(f"❌ Промокод {code} уже существует.", keyboard=kb_admin_menu())
+                cursor.clear()
+                return
+            promo = PromoCode(
+                code=code,
+                bonus_amount=bonus,
+                max_uses=max_uses,
+                expires_at=expires_at,
+                created_by=message.sender.user_id
+            )
+            session.add(promo)
+            await session.commit()
+        cursor.clear()
+        msg = f"✅ Промокод {code} создан: {bonus} бонусов"
+        if max_uses:
+            msg += f", лимит {max_uses}"
+        if expires_at:
+            msg += f", до {expires_at.strftime('%d.%m.%Y')}"
+        await message.reply(msg, keyboard=kb_admin_menu())
+
+    # --- список промокодов ---
+    @bot.on_button_callback("admin:promo_list")
+    async def admin_promo_list(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        async for session in get_session():
+            promos = (await session.execute(select(PromoCode).order_by(PromoCode.created_at.desc()))).scalars().all()
+        if not promos:
+            await cb.answer(text="🎫 Нет созданных промокодов.", keyboard=kb_back_to_menu())
+            return
+        lines = ["🎫 **Промокоды:**"]
+        now = datetime.utcnow()
+        for p in promos:
+            active = "✅" if p.is_active else "❌"
+            uses = f"{p.used_count}/{p.max_uses}" if p.max_uses else f"{p.used_count}/∞"
+            expires_info = ""
+            if p.expires_at:
+                if p.expires_at < now:
+                    expires_info = f" (истёк {p.expires_at.strftime('%d.%m.%Y')})"
+                else:
+                    expires_info = f" (до {p.expires_at.strftime('%d.%m.%Y %H:%M')})"
+            lines.append(f"{active} `{p.code}` — {p.bonus_amount} бонусов, {uses}{expires_info}")
+        await cb.answer(text="\n".join(lines), format="markdown", keyboard=kb_back_to_menu())
+
+    # --- удаление промокода ---
+    @bot.on_button_callback("admin:promo_delete")
+    async def admin_promo_delete_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        if cb.user.user_id != ADMIN_USER_ID:
+            await cb.answer(notification="❌ Нет доступа.")
+            return
+        cursor.change_state("admin_promo_delete")
+        await cb.answer(notification=" ")
+        await cb.send("✏️ Введите код промокода для удаления:", keyboard=kb_back_to_menu())
+
+    @bot.on_message(filters.state("admin_promo_delete"))
+    async def handle_admin_promo_delete(message: aiomax.Message, cursor: fsm.FSMCursor):
+        if message.sender.user_id != ADMIN_USER_ID:
+            return
+        code = message.body.text.strip().upper()
+        async for session in get_session():
+            promo = (await session.execute(select(PromoCode).where(PromoCode.code == code))).scalar_one_or_none()
+            if not promo:
+                await message.reply(f"❌ Промокод {code} не найден.", keyboard=kb_admin_menu())
+                cursor.clear()
+                return
+            await session.delete(promo)
+            await session.commit()
+        cursor.clear()
+        await message.reply(f"✅ Промокод {code} удалён.", keyboard=kb_admin_menu())
     @bot.on_button_callback("admin:auto_publish_menu")
     async def auto_publish_menu(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID:

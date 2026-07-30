@@ -52,7 +52,7 @@ async def publish_pending_products(bot: aiomax.Bot) -> tuple[int, int, bool]:
                     format="markdown",
                     attachments=attachments or None,
                 )
-                await mark_product_published(session, product, str(msg.id))
+                await mark_product_published(session, product.id, str(msg.id))
                 published += 1
                 logger.info(f"Товар #{product.id} опубликован в канал Max (post {msg.id}).")
             except Exception as e:
