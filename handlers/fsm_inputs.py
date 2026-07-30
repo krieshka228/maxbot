@@ -175,7 +175,10 @@ def register(bot: aiomax.Bot) -> None:
             items_lines = []
             for item in order.items:
                 product_name = item.product.name if item.product else f"Товар #{item.product_id}"
-                items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
+                article = item.product.article or "—" if item.product else "—"
+                items_lines.append(
+                    f"• {product_name} (арт. {article}): {item.quantity} шт. × {item.price_at_order:.0f} ₽"
+                )
             items_text = "\n".join(items_lines)
 
             kb = KeyboardBuilder()
@@ -224,7 +227,10 @@ def register(bot: aiomax.Bot) -> None:
                 items_lines = []
                 for item in order.items:
                     product_name = item.product.name if item.product else f"Товар #{item.product_id}"
-                    items_lines.append(f"• {product_name}: {item.quantity} шт. × {item.price_at_order:.0f} ₽")
+                    article = item.product.article or "—" if item.product else "—"
+                    items_lines.append(
+                        f"• {product_name} (арт. {article}): {item.quantity} шт. × {item.price_at_order:.0f} ₽"
+                    )
                 items_text = "\n".join(items_lines)
 
                 admin_text = (

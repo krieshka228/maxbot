@@ -353,64 +353,13 @@ def register(bot: aiomax.Bot) -> None:
             await cb.answer(notification="❌ Нет доступа.")
             return
         kb = KeyboardBuilder()
-        kb.row(CallbackButton("👤 Начислить бонусы пользователю", "admin:bonus_add_user"))
         kb.row(CallbackButton("👥 Начислить бонусы всем", "admin:bonus_add_all"))
         kb.row(CallbackButton("👀 Проверить баланс", "admin:bonus_check"))
         kb.row(CallbackButton("↩️ Назад", "admin:menu"))
         await cb.answer(text="💎 **Управление бонусами**", keyboard=kb, format="markdown")
 
     # --- начисление конкретному пользователю (по user_id) ---
-    @bot.on_button_callback("admin:bonus_add_user")
-    async def admin_bonus_add_user_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
-        if cb.user.user_id != ADMIN_USER_ID:
-            await cb.answer(notification="❌ Нет доступа.")
-            return
-        cursor.change_state("admin_bonus_add_user")
-        await cb.answer(notification=" ")
-        await cb.send(
-            "✏️ Введите user_id и сумму бонусов через пробел.\nПример: `123456 500`",
-            keyboard=kb_back_to_menu(),
-            format="markdown"
-        )
 
-    @bot.on_message(filters.state("admin_bonus_add_user"))
-    async def handle_admin_bonus_add_user(message: aiomax.Message, cursor: fsm.FSMCursor):
-        if message.sender.user_id != ADMIN_USER_ID:
-            return
-        parts = message.body.text.strip().split()
-        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].lstrip('-').isdigit():
-            await message.reply("❌ Формат: <user_id> <сумма>. Пример: 123456 500", keyboard=kb_admin_menu())
-            cursor.clear()
-            return
-        user_id = int(parts[0])
-        amount = int(parts[1])
-        if amount <= 0:
-            await message.reply("❌ Сумма должна быть положительной.", keyboard=kb_admin_menu())
-            cursor.clear()
-            return
-
-        async for session in get_session():
-            user = await session.get(User, user_id)
-            if not user:
-                await message.reply(f"❌ Пользователь с ID {user_id} не найден.", keyboard=kb_admin_menu())
-                cursor.clear()
-                return
-            user.bonus_balance = (user.bonus_balance or 0) + amount
-            await session.commit()
-            # уведомление пользователю (если бот может ему написать)
-            try:
-                await bot.send_message(
-                    user_id=user_id,
-                    text=f"🎉 Вам начислено {amount} бонусов!\n💰 Ваш баланс: {user.bonus_balance} бонусов.",
-                    format="markdown"
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
-        cursor.clear()
-        await message.reply(
-            f"✅ Пользователю {user_id} начислено {amount} бонусов.\n💰 Новый баланс: {user.bonus_balance} бонусов.",
-            keyboard=kb_admin_menu()
-        )
 
     # --- начисление всем ---
     @bot.on_button_callback("admin:bonus_add_all")
@@ -444,7 +393,7 @@ def register(bot: aiomax.Bot) -> None:
             users = await get_all_users(session)
             for user in users:
                 if user.id != ADMIN_USER_ID:
-                    user.bonus_balance = (user.bonus_balance or 0) + amount
+                    user.bonus_balance_max = (user.bonus_balance_max or 0) + amount
                     count += 1
                     try:
                         await bot.send_message(
@@ -489,7 +438,7 @@ def register(bot: aiomax.Bot) -> None:
                 await message.reply(f"❌ Пользователь с ID {user_id} не найден.", keyboard=kb_admin_menu())
                 cursor.clear()
                 return
-            balance = user.bonus_balance or 0
+            balance = user.bonus_balance_max or 0
         cursor.clear()
         await message.reply(
             f"💎 Баланс пользователя {user_id}: {balance} бонусов.",
@@ -548,18 +497,15 @@ def register(bot: aiomax.Bot) -> None:
         max_uses = None
         expires_at = None
         for part in parts[2:]:
-            # пробуем как число
             try:
                 max_uses = int(part)
                 continue
             except ValueError:
                 pass
-            # пробуем как дату
             dt = parse_datetime(part)
             if dt:
                 expires_at = dt
                 continue
-            # если не подошло
             await message.reply(f"❌ Не удалось распознать параметр '{part}'.", keyboard=kb_admin_menu())
             cursor.clear()
             return
@@ -575,7 +521,8 @@ def register(bot: aiomax.Bot) -> None:
                 bonus_amount=bonus,
                 max_uses=max_uses,
                 expires_at=expires_at,
-                created_by=message.sender.user_id
+                created_by=message.sender.user_id,
+                platform='MAX'  # ← привязка к платформе Max
             )
             session.add(promo)
             await session.commit()

@@ -405,8 +405,6 @@ def register(bot: aiomax.Bot) -> None:
         text = product.name
         if product.article:
             text += f"\nАртикул {product.article}"
-        if product.stock is not None:
-            text += f"\nНа складе: {product.stock}"
         text += f"\n\nЦена {product.price:.0f}"
         text += "\n\n✏️ Введите количество:"
 
@@ -434,7 +432,7 @@ def register(bot: aiomax.Bot) -> None:
 
     @bot.on_message(filters.state("order_qty"))
     async def handle_order_qty(message: aiomax.Message, cursor: fsm.FSMCursor):
-        """Обработка ввода количества."""
+        """Обработка ввода количества (без проверки остатков)."""
         qty = parse_quantity(message.body.text or "")
         data = cursor.get_data()
         product_id = data.get("product_id")
@@ -478,33 +476,26 @@ def register(bot: aiomax.Bot) -> None:
             )
             order = (await session.execute(stmt)).scalar_one()
 
-            existing_qty = 0
-            for item in order.items:
-                if item.product_id == product_id:
-                    existing_qty = item.quantity
-                    break
-            total_qty = existing_qty + qty
-
-            if product.stock is not None and total_qty > product.stock:
-                msg = (f"❌ Недостаточно товара. В наличии: {product.stock} шт."
-                       + (f", у вас в корзине уже {existing_qty} шт." if existing_qty else ""))
-                if card_msg_id:
-                    await bot.edit_message(message_id=card_msg_id, text=msg, keyboard=kb_back_to_menu())
-                else:
-                    await message.reply(msg, keyboard=kb_back_to_menu())
-                cursor.clear()
-                return
-
             await add_item_to_order(session, order, product, qty)
             order = (await session.execute(stmt)).scalar_one()
             invalidate_catalog_cache()
 
         cursor.clear()
 
+        # Сохраняем контекст каталога в FSM
+        cat = data.get("catalog_category", "")
+        sub = data.get("catalog_subcategory", "")
+        page = data.get("catalog_page", 0)
+
         confirm_text = f"✅ **{product.name}** × {qty} шт. добавлен в корзину!"
         kb = KeyboardBuilder()
         kb.row(CallbackButton("🛒 Перейти в корзину", "cart:view", intent='default'))
-        kb.row(CallbackButton("📦 Продолжить покупки", "catalog:show", intent='default'))
+        if cat and sub:
+            kb.row(CallbackButton("📦 Продолжить покупки",
+                                  f"catalog:continue:{cat}:{sub}:{page}",
+                                  intent='default'))
+        else:
+            kb.row(CallbackButton("📦 Продолжить покупки", "catalog:show", intent='default'))
         kb.row(CallbackButton("🏠 Главное меню", "menu:main", intent='default'))
 
         if card_msg_id:
@@ -519,7 +510,39 @@ def register(bot: aiomax.Bot) -> None:
             await message.reply(confirm_text, keyboard=kb, format="markdown")
 
     # ========================== ПОИСК ==========================
+    @bot.on_button_callback(lambda cb: cb.payload.startswith("catalog:continue:"))
+    async def catalog_continue(cb: aiomax.Callback, cursor: fsm.FSMCursor):
+        """Возврат в ту же подкатегорию/страницу."""
+        if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():
+            await cb.answer(
+                text="⚠️ Бот временно недоступен. Приносим извинения.",
+                keyboard=kb_unavailable(),
+                format="markdown"
+            )
+            return
 
+        parts = cb.payload.split(":")
+        category = parts[2]
+        subcategory = parts[3]
+        page = int(parts[4])
+
+        # Восстанавливаем контекст FSM
+        cursor.change_data({
+            "catalog_category": category,
+            "catalog_subcategory": subcategory,
+            "catalog_page": page
+        })
+
+        # Удаляем карточки и навигацию (текущее сообщение будет удалено в _show_products_page)
+        user_id = cb.user.user_id
+        await delete_catalog_messages(user_id, bot, keep_current=False)
+        try:
+            await bot.delete_message(cb.message.id)
+        except Exception:
+            pass
+
+        # Показываем ту же страницу товаров
+        await _show_products_page(bot, cb, category, subcategory, page)
     @bot.on_button_callback("search:article")
     async def search_article_start(cb: aiomax.Callback, cursor: fsm.FSMCursor):
         if cb.user.user_id != ADMIN_USER_ID and not await check_payment_qr():

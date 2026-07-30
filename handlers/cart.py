@@ -311,7 +311,7 @@ def register(bot: aiomax.Bot) -> None:
         cursor.clear()
 
     async def _finalize_order(ctx, order_id, user_id, bonus_amount):
-        """Списывает бонусы, меняет статус и отправляет QR с информацией."""
+        """Списывает бонусы (Max), меняет статус и отправляет QR с информацией."""
         async for session in get_session():
             order = await get_order_with_items(session, order_id)
             if not order or order.user_id != user_id:
@@ -322,10 +322,10 @@ def register(bot: aiomax.Bot) -> None:
                 await ctx.send("❌ Заказ уже нельзя изменить.")
                 return
 
-            # Применяем бонусы
+            # Применяем бонусы (Max‑баланс)
             if bonus_amount > 0:
                 user = await session.get(User, user_id)
-                user.bonus_balance -= bonus_amount
+                user.bonus_balance_max -= bonus_amount
                 order.bonus_used = bonus_amount
                 order.total_amount -= bonus_amount
 
@@ -399,9 +399,9 @@ def register(bot: aiomax.Bot) -> None:
                 await cb.send("🛒 Корзина пуста.")
                 return
 
-            # --- Проверка бонусного баланса ---
+            # --- Проверка бонусного баланса (Max) ---
             user = await session.get(User, user_id)
-            bonus_balance = user.bonus_balance if user else 0
+            bonus_balance = user.bonus_balance_max if user else 0
             if bonus_balance > 0 and order.total_amount > 0:
                 cursor.change_state("order_bonus_input")
                 cursor.change_data({

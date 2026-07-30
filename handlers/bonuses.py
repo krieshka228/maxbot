@@ -1,7 +1,7 @@
 """
 handlers/bonuses.py — Бонусная система Max‑бота:
-  - просмотр баланса
-  - активация промокода (одноразовая, с проверкой срока и лимита)
+  - просмотр баланса (Max)
+  - активация промокода (одноразовая, с проверкой платформы, срока и лимита)
 """
 
 import logging
@@ -28,7 +28,7 @@ def register(bot: aiomax.Bot) -> None:
 
         async for session in get_session():
             user = await session.get(User, user_id)
-            bonus = user.bonus_balance if user else 0
+            bonus = user.bonus_balance_max if user else 0
 
         text = (
             f"💎 **Ваши бонусы**\n\n"
@@ -70,23 +70,29 @@ def register(bot: aiomax.Bot) -> None:
                 cursor.clear()
                 return
 
+            # Проверка платформы: Max‑промокод или универсальный
+            if promo.platform is not None and promo.platform != 'MAX':
+                await message.reply("❌ Этот промокод предназначен для другого мессенджера.",
+                                    keyboard=kb_main_menu(is_admin=is_admin))
+                cursor.clear()
+                return
+
             # Проверка срока действия
             if promo.expires_at:
-                expires_dt = promo.expires_at.replace(tzinfo=timezone.utc) if promo.expires_at.tzinfo is None else promo.expires_at
+                expires_dt = promo.expires_at.replace(
+                    tzinfo=timezone.utc) if promo.expires_at.tzinfo is None else promo.expires_at
                 if datetime.now(timezone.utc) > expires_dt:
                     await message.reply("❌ Срок действия промокода истёк.",
                                         keyboard=kb_main_menu(is_admin=is_admin))
                     cursor.clear()
                     return
 
-            # Лимит использований
             if promo.max_uses is not None and promo.used_count >= promo.max_uses:
                 await message.reply("❌ Промокод больше не действует (достигнут лимит).",
                                     keyboard=kb_main_menu(is_admin=is_admin))
                 cursor.clear()
                 return
 
-            # Проверка повторного использования
             already = (await session.execute(
                 select(PromoUsage).where(
                     PromoUsage.promo_code == code,
@@ -99,16 +105,15 @@ def register(bot: aiomax.Bot) -> None:
                 cursor.clear()
                 return
 
-            # Начисляем бонусы
             user = await session.get(User, user_id)
             if not user:
-                user = User(id=user_id, bonus_balance=0)
+                user = User(id=user_id, bonus_balance_max=0)
                 session.add(user)
-            user.bonus_balance = (user.bonus_balance or 0) + promo.bonus_amount
+            user.bonus_balance_max = (user.bonus_balance_max or 0) + promo.bonus_amount
             promo.used_count += 1
             session.add(PromoUsage(promo_code=code, user_id=user_id))
             await session.commit()
-            new_balance = user.bonus_balance
+            new_balance = user.bonus_balance_max
 
         cursor.clear()
         await message.reply(

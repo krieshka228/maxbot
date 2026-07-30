@@ -105,7 +105,8 @@ async def auto_publish_loop(bot: aiomax.Bot):
 
                     post_id = await publish_product_to_max(bot, product, CHANNEL_ID)
                     if post_id:
-                        await mark_product_published(session, product, str(post_id))
+                        product.max_post_id = str(post_id)  # обновляем объект
+                        await mark_product_published(session, product.id, str(post_id))
                         logger.info(f"Товар #{product.id} опубликован (post {post_id})")
                     else:
                         logger.warning(f"Товар #{product.id} не опубликован")

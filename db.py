@@ -79,7 +79,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(128))
     full_name: Mapped[str | None] = mapped_column(String(256))
-    bonus_balance: Mapped[int] = mapped_column(Integer, default=0)
+    bonus_balance: Mapped[int] = mapped_column(Integer, default=0)  # оставьте для совместимости
+    bonus_balance_tg: Mapped[int] = mapped_column(Integer, default=0)  # ← добавить
+    bonus_balance_max: Mapped[int] = mapped_column(Integer, default=0)
     phone: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
     platform: Mapped[str | None] = mapped_column(String(32), nullable=True)  # "MAX" или "Telegram"
@@ -170,6 +172,7 @@ class PromoCode(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     bonus_amount: Mapped[int] = mapped_column(Integer, nullable=False)
     max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(16), nullable=True)  # ← добавить ('TG', 'MAX', None)
     used_count: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -206,22 +209,36 @@ def _ensure_added_columns(conn):
         cols = {c["name"] for c in insp.get_columns("users")}
         if "platform" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN platform TEXT"))
-        # новые поля для бонусной системы
         if "bonus_balance" not in cols:
             conn.execute(text("ALTER TABLE users ADD COLUMN bonus_balance INTEGER DEFAULT 0"))
+        if "bonus_balance_tg" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN bonus_balance_tg INTEGER DEFAULT 0"))
+        if "bonus_balance_max" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN bonus_balance_max INTEGER DEFAULT 0"))
     if "orders" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("orders")}
         if "bonus_used" not in cols:
             conn.execute(text("ALTER TABLE orders ADD COLUMN bonus_used INTEGER DEFAULT 0"))
+    if "promo_codes" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("promo_codes")}
+        if "platform" not in cols:
+            conn.execute(text("ALTER TABLE promo_codes ADD COLUMN platform VARCHAR(16)"))
 
 
 async def init_db() -> None:
-    """Создаёт схему (если её ещё нет), недостающие колонки и индексы.
-    Если БД уже создана Telegram-ботом — create_all() ничего не сломает
-    (CREATE TABLE IF NOT EXISTS по сути), просто добавит то, чего не хватает."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_added_columns)
+
+        # Переносим старые бонусы в tg‑поле, если оно пустое
+        await conn.execute(text(
+            "UPDATE users SET bonus_balance_tg = bonus_balance WHERE bonus_balance_tg = 0 AND bonus_balance > 0"
+        ))
+        # Переносим старые бонусы в max‑поле для пользователей Max
+        await conn.execute(text(
+            "UPDATE users SET bonus_balance_max = bonus_balance WHERE bonus_balance_max = 0 AND bonus_balance > 0 AND platform = 'MAX'"
+        ))
+
         for stmt in _CATALOG_INDEXES:
             await conn.execute(text(stmt))
 

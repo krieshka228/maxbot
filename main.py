@@ -129,7 +129,7 @@ async def main():
 
     os.environ['NO_PROXY'] = 'platform-api.max.ru'
 
-    bot = aiomax.Bot(BOT_TOKEN, default_format="markdown")
+    bot = aiomax.Bot(BOT_TOKEN, default_format="markdown", use_certificate=True)
 
     # Остальной код без изменений
     patch_bot_antiflood(bot)
