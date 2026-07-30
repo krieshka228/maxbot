@@ -468,10 +468,10 @@ def register(bot: aiomax.Bot) -> None:
         await cb.answer(notification=" ")
         await cb.send(
             "✏️ Введите данные промокода в формате:\n"
-            "<code>КОД</code> <бонусы> [лимит] [дата_окончания]\n\n"
+            "КОД <бонусы> [лимит] [дата_окончания]\n\n"
             "Примеры:\n"
-            "<code>NEWYEAR 500 100 31-12-2026</code> — 500 бонусов, 100 активаций, до 31.12.2026\n"
-            "<code>WELCOME 200</code> — безлимитный и бессрочный",
+            "NEWYEAR 500 100 31-12-2026 — 500 бонусов, 100 активаций, до 31.12.2026\n"
+            "WELCOME 200 — безлимитный и бессрочный",
             keyboard=kb_back_to_menu(),
             format="markdown"
         )
