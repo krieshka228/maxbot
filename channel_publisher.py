@@ -22,6 +22,8 @@ from sqlalchemy import select
 logger = logging.getLogger(__name__)
 
 # Как часто фоновая задача проверяет БД на новые товары для автопубликации.
+# ВНИМАНИЕ: до фикса 14.09.2026 эта константа была объявлена, но нигде не
+# использовалась — из-за чего цикл опроса крутился вообще без пауз.
 AUTO_PUBLISH_INTERVAL = 300  # 5 минут
 
 
@@ -66,19 +68,36 @@ async def publish_pending_products(bot: aiomax.Bot) -> tuple[int, int, bool]:
 
 
 async def auto_publish_loop(bot: aiomax.Bot):
-    logger.info("Задача автопубликации в канал Max запущена.")
+    """Фоновая автопубликация товаров в канал Max.
+
+    ИСТОРИЯ БАГА (фикс 14.09.2026):
+    Раньше `if not products: break` выходил из `async for session in get_session()`,
+    а НЕ из `while True`, и в этой ветке не было ни одного `await asyncio.sleep`.
+    При auto_publish_enabled=true и отсутствии товаров цикл крутился вхолостую
+    на полной скорости: ~80% CPU, ~530 откатов транзакций в секунду,
+    более 1.6 млн rollback'ов в pg_stat_database. Именно это выжимало память
+    и вешало сервер.
+
+    Теперь: каждая итерация ОБЯЗАНА завершаться паузой, а сессия БД не
+    удерживается открытой во время сна.
+    """
+    logger.info(
+        "Задача автопубликации в канал Max запущена (интервал опроса: %s с.).",
+        AUTO_PUBLISH_INTERVAL,
+    )
     while True:
         try:
-            # Проверяем глобальный флаг автопубликации
+            # ── 1. Читаем флаг автопубликации в короткой сессии ──────────
+            enabled = None
             async for session in get_session():
                 enabled = await get_bot_setting(session, "auto_publish_enabled")
-                break
 
             if enabled != "true":
-                await asyncio.sleep(10)
+                await asyncio.sleep(AUTO_PUBLISH_INTERVAL)
                 continue
 
-            # Получаем список товаров для публикации
+            # ── 2. Читаем товары в короткой сессии и закрываем её ────────
+            products = []
             async for session in get_session():
                 products = (await session.execute(
                     select(Product).where(
@@ -87,33 +106,46 @@ async def auto_publish_loop(bot: aiomax.Bot):
                     )
                 )).scalars().all()
 
-                if not products:
+            # expire_on_commit=False, поэтому атрибуты доступны после закрытия сессии
+            if not products:
+                # Публиковать нечего. Пауза ОБЯЗАТЕЛЬНА — без неё while True
+                # превращается в busy-loop.
+                await asyncio.sleep(AUTO_PUBLISH_INTERVAL)
+                continue
+
+            logger.info(f"Найдено {len(products)} товаров для автопубликации")
+
+            # ── 3. Публикуем: своя короткая сессия на каждый товар ────────
+            for product in products:
+                # Перед каждой публикацией проверяем флаг
+                async for session in get_session():
+                    enabled_now = await get_bot_setting(session, "auto_publish_enabled")
+                if enabled_now != "true":
+                    logger.info("Автопубликация выключена пользователем")
                     break
 
-                logger.info(f"Найдено {len(products)} товаров для автопубликации")
+                # Пауза 60 секунд перед каждым постом
+                logger.info("Пауза 60 секунд перед публикацией следующего товара")
+                await asyncio.sleep(60)
 
-                for product in products:
-                    # Перед каждой публикацией проверяем флаг
-                    enabled_now = await get_bot_setting(session, "auto_publish_enabled")
-                    if enabled_now != "true":
-                        logger.info("Автопубликация выключена пользователем")
-                        break
-
-                    # Пауза 60 секунд перед каждым постом
-                    logger.info("Пауза 60 секунд перед публикацией следующего товара")
-                    await asyncio.sleep(60)
-
-                    post_id = await publish_product_to_max(bot, product, CHANNEL_ID)
-                    if post_id:
-                        product.max_post_id = str(post_id)  # обновляем объект
+                post_id = await publish_product_to_max(bot, product, CHANNEL_ID)
+                if post_id:
+                    async for session in get_session():
                         await mark_product_published(session, product.id, str(post_id))
-                        logger.info(f"Товар #{product.id} опубликован (post {post_id})")
-                    else:
-                        logger.warning(f"Товар #{product.id} не опубликован")
+                    logger.info(f"Товар #{product.id} опубликован (post {post_id})")
+                else:
+                    logger.warning(f"Товар #{product.id} не опубликован")
 
+            # После обработки пачки тоже делаем штатную паузу
+            await asyncio.sleep(AUTO_PUBLISH_INTERVAL)
+
+        except asyncio.CancelledError:
+            logger.info("Задача автопубликации отменена — выходим.")
+            raise
         except Exception as e:
             logger.error(f"Ошибка в автопубликации: {e}", exc_info=True)
-            await asyncio.sleep(10)
+            # Пауза на ошибках тоже обязательна, иначе — busy-loop на сбое БД
+            await asyncio.sleep(AUTO_PUBLISH_INTERVAL)
 async def publish_product_to_max(bot: aiomax.Bot, product: Product, channel_id: int) -> str | None:
     """Публикует один товар в канал Max, возвращает post_id или None."""
     text = build_post_text(product)
