@@ -1,3 +1,26 @@
-orders.db
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Секреты и локальное окружение
 .env
-.idea
+.env.*
+!.env.example
+secrets/
+credentials.json
+*.pem
+*.key
+
+# Базы и данные
+*.db
+orders.db
+
+# IDE
+.idea/
+.vscode/
+
+# Резервные копии
+*.bak
+*.bak-*
