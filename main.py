@@ -1,34 +1,29 @@
 import asyncio
 import logging
 import os
-import os
 os.environ.setdefault('NO_PROXY', 'platform-api.max.ru')
 os.environ['NO_PROXY'] = '*'
 import aiohttp
-from handlers import bonuses
 import aiomax
 from aiomax.bot import Bot
+
 from config import BOT_TOKEN
 from db import init_db, engine
 from reminders import reminder_loop
 from channel_publisher import auto_publish_loop
 
-# ── Настройка логирования ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
-# Отключаем подробные DEBUG-логи библиотек (они слишком шумные)
 logging.getLogger("aiomax").setLevel(logging.WARNING)
-logging.getLogger("aiosqlite").setLevel(logging.WARNING)   # если используется
-logging.getLogger("httpx").setLevel(logging.WARNING)       # если есть
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-# При необходимости можно убрать все логгеры из сторонних библиотек
 
 logger = logging.getLogger(__name__)
 
-# ── Патч CallbackButton.__init__ – автоматически добавляет intent='default' ──
+# ── Патчи CallbackButton ──
 import aiomax.buttons as _buttons
 _original_cb_init = _buttons.CallbackButton.__init__
 
@@ -37,7 +32,6 @@ def _patched_cb_init(self, text, payload, intent='default'):
 
 _buttons.CallbackButton.__init__ = _patched_cb_init
 
-# ── Патч CallbackButton.from_json ──────────────────────────────────────────
 from aiomax.buttons import CallbackButton as _CB
 _original_cb_from_json = _CB.from_json
 
@@ -49,7 +43,7 @@ def patched_cb_from_json(cls, data: dict):
 
 _CB.from_json = patched_cb_from_json
 
-# ── Патч методов Bot для авторизации через заголовок ─────────────────────
+# ── ВОЗВРАЩАЕМ патчи методов Bot для авторизации ─────────────────────
 _original_get = Bot.get
 _original_post = Bot.post
 _original_put = Bot.put
@@ -88,7 +82,7 @@ Bot.get = patched_get
 Bot.post = patched_post
 Bot.put = patched_put
 
-# ── Патч handle_update: sender для канала ────────────────────────────────
+# ── Патч handle_update (sender для канала) ────────────────────────────────
 _original_handle_update = Bot.handle_update
 
 async def patched_handle_update(self, update: dict):
@@ -106,9 +100,9 @@ async def patched_handle_update(self, update: dict):
 
 Bot.handle_update = patched_handle_update
 
-# ── Импортируем обработчики ПОСЛЕ всех патчей ──────────────────────────────
-from  handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
-from  middlewares import patch_bot_antiflood
+# ── Импортируем обработчики ПОСЛЕ патчей ──────────────────────────────
+from handlers import start, cart, checkout, fsm_inputs, posts, admin, orders, catalog
+from middlewares import patch_bot_antiflood
 
 
 async def main():
@@ -122,20 +116,21 @@ async def main():
         products = await get_products_without_max_post(session)
         logger.info(f"Товаров для публикации: {len(products)}")
 
-    # ── Создаём сессию без прокси ──────────────────────────────────────
-    connector = aiohttp.TCPConnector()  # по умолчанию без прокси
-    timeout = aiohttp.ClientTimeout(total=60)  # можно увеличить
-    session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    # ── Создаём сессию с базовым URL и отключённой проверкой SSL ────────
+    import ssl
+    base_url = "https://platform-api.max.ru"
+    connector = aiohttp.TCPConnector(ssl=False)   # отключаем проверку сертификата
+    timeout = aiohttp.ClientTimeout(total=60)
+    session = aiohttp.ClientSession(base_url=base_url, connector=connector, timeout=timeout)
 
     os.environ['NO_PROXY'] = 'platform-api.max.ru'
 
-    bot = aiomax.Bot(BOT_TOKEN, default_format="markdown", use_certificate=True)
+    bot = aiomax.Bot(BOT_TOKEN, default_format="markdown")
+    bot.session = session   # ← присваиваем нашу сессию боту
 
-    # Остальной код без изменений
     patch_bot_antiflood(bot)
 
     start.register(bot)
-    bonuses.register(bot)
     cart.register(bot)
     checkout.register(bot)
     admin.register(bot)
@@ -152,13 +147,12 @@ async def main():
 
     logger.info("Бот запускается (Long Polling)...")
     try:
-        await bot.start_polling()
+        await bot.start_polling(session=session)   # ← передаём сессию
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
         logger.info("Закрытие соединений с БД...")
         await engine.dispose()
-        # Сессию тоже можно закрыть, но обычно это делает aiomax
         await session.close()
         logger.info("Бот остановлен.")
 
